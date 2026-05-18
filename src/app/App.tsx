@@ -42,7 +42,7 @@ import { sumLeafIngredients } from "./ingredients";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type NodeType = "root" | "service" | "module" | "component" | "resource" | "emc";
+type NodeType = "root" | "module" | "component" | "resource" | "emc";
 
 interface TreeNode {
   id: string;
@@ -122,8 +122,7 @@ const TYPE_CONFIG: Record<NodeType, { dot: string; badge: string; text: string; 
   module:    { dot: "#34d399", badge: "rgba(52,211,153,0.12)",  text: "#34d399", label: "Crafting"     },
   component: { dot: "#fb923c", badge: "rgba(251,146,60,0.12)",  text: "#fb923c", label: "MAX STEP"     },
   resource:  { dot: "#94a3b8", badge: "rgba(148,163,184,0.09)", text: "#94a3b8", label: "Raw Resource" },
-  emc:       { dot: "#a855f7", badge: "rgba(168,85,247,0.12)",  text: "#a855f7", label: "EMC"          },
-  service:   { dot: "#a78bfa", badge: "rgba(167,139,250,0.12)", text: "#a78bfa", label: "service"      },
+  emc:       { dot: "#a855f7", badge: "rgba(168,85,247,0.12)",  text: "#a855f7", label: "EMC"          }
 };
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
