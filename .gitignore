@@ -36,3 +36,9 @@ pnpm-debug.log*
 *.njsproj
 *.sln
 *.swp
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+!.env.example
