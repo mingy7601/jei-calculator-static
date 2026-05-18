@@ -64,7 +64,7 @@ export interface Manifest {
 
 // ── Internal state ────────────────────────────────────────────────────────────
 
-/** Base URL where your /data/ folder is served from (Cloudflare Pages public dir) */
+/** Base URL where your /data/ folder is served from*/
 const DATA_BASE = "/data";
 
 let manifest: Manifest | null = null;
@@ -100,7 +100,6 @@ export async function getEmcMap(): Promise<EmcMap> {
 function shardKeyForId(itemId: string): string {
   // "item:minecraft:stone:0" → "minecraft"
   // "fluid:water"            → "fluid"
-  // "oredict:ingotIron"      → "oredict"
   const parts = itemId.split(":");
   return parts.length >= 2 ? parts[1] : (itemId[0] ?? "misc");
 }
@@ -172,7 +171,7 @@ export async function preWarmShards(itemIds: string[]): Promise<void> {
 }
 
 /**
- * Resolve a user query (name or item_id) → canonical item_id.
+ * Resolve a user query (name or item_id) → display name.
  * e.g. "melter" → "item:nuclearcraft:melter_idle"
  */
 export async function resolveItemId(query: string): Promise<string> {

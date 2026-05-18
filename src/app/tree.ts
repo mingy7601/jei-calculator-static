@@ -160,8 +160,6 @@ export function buildTree(
 }
 
 // ── Collect all item ids referenced in a tree ─────────────────────────────────
-
-/** Useful for pre-warming shards before a full tree build */
 export function collectItemIds(node: TreeNode, out = new Set<string>()): Set<string> {
   out.add(node.item);
   node.inputs?.forEach((c) => collectItemIds(c, out));

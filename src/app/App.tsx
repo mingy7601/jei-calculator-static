@@ -1,15 +1,22 @@
 /**
  * App.tsx — static version (no Flask backend)
  *
- * Data flow:
- *   1. On mount: load manifest (once), then build tree for default item
- *   2. On search: resolveItemId → preWarmShards → buildTree → sumLeafIngredients
- *   3. On alt select: same as search but preserving expanded state
- *
- * All recipe data is fetched from /data/r_{mod}.json shards.
+ * Performance improvements over previous version:
+ *   1. Viewport culling   — only render nodes visible in the current pan window
+ *   2. NodeCard memo      — individual cards skip re-render when props unchanged
+ *   3. Pan throttle       — mousemove capped at ~60 fps via requestAnimationFrame
+ *   4. Animation toggle   — AnimatePresence disabled when nodes >= 200
+ *   5. Edge culling       — only draw edges where at least one endpoint is visible
  */
 
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import {
+  useState,
+  useEffect,
+  useRef,
+  useCallback,
+  useMemo,
+  memo,
+} from "react";
 import {
   ChevronRight,
   ChevronDown,
@@ -111,12 +118,12 @@ function buildLayout(
 // ─── Visual tokens ─────────────────────────────────────────────────────────────
 
 const TYPE_CONFIG: Record<NodeType, { dot: string; badge: string; text: string; label: string }> = {
-  root:      { dot: "#22d3ee", badge: "rgba(34,211,238,0.12)",  text: "#22d3ee", label: "root"         },
-  module:    { dot: "#34d399", badge: "rgba(52,211,153,0.12)",  text: "#34d399", label: "Crafting"      },
-  component: { dot: "#fb923c", badge: "rgba(251,146,60,0.12)",  text: "#fb923c", label: "MAX STEP"      },
-  resource:  { dot: "#94a3b8", badge: "rgba(148,163,184,0.09)", text: "#94a3b8", label: "Raw Resource"  },
-  emc:       { dot: "#a855f7", badge: "rgba(168,85,247,0.12)",  text: "#a855f7", label: "EMC"           },
-  service:   { dot: "#a78bfa", badge: "rgba(167,139,250,0.12)", text: "#a78bfa", label: "service"       },
+  root:      { dot: "#22d3ee", badge: "rgba(34,211,238,0.12)",  text: "#22d3ee", label: "root"        },
+  module:    { dot: "#34d399", badge: "rgba(52,211,153,0.12)",  text: "#34d399", label: "Crafting"     },
+  component: { dot: "#fb923c", badge: "rgba(251,146,60,0.12)",  text: "#fb923c", label: "MAX STEP"     },
+  resource:  { dot: "#94a3b8", badge: "rgba(148,163,184,0.09)", text: "#94a3b8", label: "Raw Resource" },
+  emc:       { dot: "#a855f7", badge: "rgba(168,85,247,0.12)",  text: "#a855f7", label: "EMC"          },
+  service:   { dot: "#a78bfa", badge: "rgba(167,139,250,0.12)", text: "#a78bfa", label: "service"      },
 };
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
@@ -150,7 +157,7 @@ function countAll(node: TreeNode): number {
   return 1 + (node.children?.reduce((s, c) => s + countAll(c), 0) ?? 0);
 }
 
-// ─── Convert raw TreeNode → display TreeNode ────────────────────────────────
+// ─── Convert raw TreeNode → display TreeNode ──────────────────────────────────
 
 const MAX_STEPS = 5;
 
@@ -195,7 +202,7 @@ function rawToDisplay(node: RawTreeNode, isRoot = false): TreeNode {
   return result;
 }
 
-// ─── Load helpers (replacing Flask API calls) ──────────────────────────────
+// ─── Load helpers ─────────────────────────────────────────────────────────────
 
 async function loadTree(
   query: string,
@@ -206,56 +213,33 @@ async function loadTree(
     getEmcMap(),
   ]);
 
-  // Load root item's shard first to get its name
   const rootRecipes = await getRecipes(itemId);
   const rootName = (() => {
     if (!rootRecipes.length) return query;
     const best = rootRecipes.reduce((a, b) =>
       (b.outputs.find((o) => o.id === itemId)?.qty ?? 0) >
       (a.outputs.find((o) => o.id === itemId)?.qty ?? 0)
-        ? b
-        : a
+        ? b : a
     );
     return best.outputs.find((o) => o.id === itemId)?.name ?? query;
   })();
 
-  // Do a quick shallow build to discover which shards we'll need
   const recipes = getLoadedRecipes();
-  const shallowTree = buildTree(itemId, recipes, 0, MAX_STEPS, {
-    name: rootName,
-    overrides,
-    emcValues,
-  });
+  const shallowTree = buildTree(itemId, recipes, 0, MAX_STEPS, { name: rootName, overrides, emcValues });
   const allIds = Array.from(collectItemIds(shallowTree));
 
-  // Pre-warm all shards needed for a full build
   await preWarmShards(allIds);
 
-  // Full build with all shards loaded
   const fullRecipes = getLoadedRecipes();
-  const rawTree = buildTree(itemId, fullRecipes, 0, MAX_STEPS, {
-    name: rootName,
-    overrides,
-    emcValues,
-  });
+  const rawTree = buildTree(itemId, fullRecipes, 0, MAX_STEPS, { name: rootName, overrides, emcValues });
 
-  return {
-    displayTree: rawToDisplay(rawTree, true),
-    rawTree,
-    recipes: fullRecipes,
-    emcValues,
-  };
+  return { displayTree: rawToDisplay(rawTree, true), rawTree, recipes: fullRecipes, emcValues };
 }
 
-function getAlternatives(
-  itemId: string,
-  recipes: RecipeMap
-): AltOption[] {
+function getAlternatives(itemId: string, recipes: RecipeMap): AltOption[] {
   const options = recipes[itemId] ?? [];
   return options
-    .filter(
-      (r) => !r.inputs.some((inp) => wouldCycle(inp.id, itemId, recipes))
-    )
+    .filter((r) => !r.inputs.some((inp) => wouldCycle(inp.id, itemId, recipes)))
     .map((r) => ({
       recipe_id: r.id,
       category_name: r.category_name,
@@ -265,9 +249,228 @@ function getAlternatives(
     }));
 }
 
-// ─── Component ────────────────────────────────────────────────────────────────
+// ─── NodeCard (memoised) ──────────────────────────────────────────────────────
+// Extracted so React.memo can skip re-renders for off-screen or unchanged nodes.
+
+interface NodeCardProps {
+  node: LayoutNode;
+  isTreeEx: boolean;
+  isCardEx: boolean;
+  isSel: boolean;
+  isAltOpen: boolean;
+  altLoading: boolean;
+  useAnimations: boolean;
+  onSelect: () => void;
+  onToggleTree: (e: React.MouseEvent) => void;
+  onToggleCard: (e: React.MouseEvent) => void;
+  onAltClick: (e: React.MouseEvent) => void;
+}
+
+const NodeCard = memo(
+  ({
+    node,
+    isTreeEx,
+    isCardEx,
+    isSel,
+    isAltOpen,
+    altLoading,
+    useAnimations,
+    onSelect,
+    onToggleTree,
+    onToggleCard,
+    onAltClick,
+  }: NodeCardProps) => {
+    const cfg = TYPE_CONFIG[node.type];
+    const hasKids = !!node.children?.length;
+
+    const inner = (
+      <div
+        className="w-full h-full flex flex-col rounded-lg overflow-hidden transition-shadow duration-150"
+        style={{
+          background: isSel ? "rgba(34,211,238,0.045)" : "var(--card)",
+          border: `1px solid ${isSel ? "rgba(34,211,238,0.42)" : "rgba(255,255,255,0.07)"}`,
+          boxShadow: isSel
+            ? "inset 3px 0 0 rgba(34,211,238,0.65), 0 4px 24px rgba(0,0,0,0.45)"
+            : "0 2px 12px rgba(0,0,0,0.3)",
+          cursor: "pointer",
+        }}
+      >
+        {/* Content row */}
+        <div className="flex-1 flex flex-col justify-center px-3.5 pt-2.5 pb-2 min-h-0">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: cfg.dot }} />
+              <span className="text-[13px] font-medium text-foreground truncate leading-tight">
+                {node.label}
+              </span>
+            </div>
+            <div className="flex items-center gap-0.5 shrink-0">
+              {node.type !== "resource" && (
+                <button
+                  data-node
+                  className="w-[22px] h-[22px] flex items-center justify-center rounded hover:bg-white/5 transition-colors text-muted-foreground hover:text-foreground"
+                  style={isAltOpen ? { color: "#22d3ee" } : {}}
+                  onClick={onAltClick}
+                  aria-label="Show alternative recipes"
+                  title="Alternatives"
+                >
+                  {altLoading ? (
+                    <Loader2 size={10} className="animate-spin" />
+                  ) : (
+                    <span style={{ fontSize: 11 }}>⇄</span>
+                  )}
+                </button>
+              )}
+            </div>
+            {hasKids && (
+              <button
+                data-node
+                className="shrink-0 w-[22px] h-[22px] flex items-center justify-center rounded hover:bg-white/5 transition-colors"
+                style={{ color: isTreeEx ? cfg.dot : "rgba(255,255,255,0.28)" }}
+                onClick={onToggleTree}
+                aria-label={isTreeEx ? "Collapse children" : "Expand children"}
+              >
+                <ChevronRight
+                  size={11}
+                  style={{
+                    transform: isTreeEx ? "rotate(90deg)" : "rotate(0deg)",
+                    transition: "transform 0.2s ease",
+                  }}
+                />
+              </button>
+            )}
+          </div>
+          <div className="flex items-center gap-2 mt-2">
+            {node.meta && (
+              <span
+                className="text-[10px] px-1.5 py-px rounded leading-none"
+                style={{ background: cfg.badge, color: cfg.text, fontFamily: "'JetBrains Mono', monospace" }}
+              >
+                {node.meta}
+              </span>
+            )}
+            {hasKids && (
+              <span
+                className="text-[10px] text-muted-foreground leading-none"
+                style={{ fontFamily: "'JetBrains Mono', monospace" }}
+              >
+                {node.children!.length}&thinsp;children
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Image panel */}
+        <AnimatePresence>
+          {isCardEx && (
+            <motion.div
+              key="img"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.15 }}
+              className="border-t border-border overflow-hidden"
+              style={{ height: NODE_H_IMAGE }}
+            >
+              {node.imageUrl ? (
+                <img
+                  src={node.imageUrl}
+                  alt={node.label}
+                  className="w-full h-full object-contain"
+                  draggable={false}
+                />
+              ) : (
+                <div
+                  className="w-full h-full flex flex-col items-center justify-center gap-2"
+                  style={{ background: "rgba(255,255,255,0.02)" }}
+                >
+                  <ImageOff size={18} className="text-muted-foreground opacity-40" />
+                  <span
+                    className="text-[10px] text-muted-foreground opacity-50"
+                    style={{ fontFamily: "'JetBrains Mono', monospace" }}
+                  >
+                    no image
+                  </span>
+                </div>
+              )}
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Expand strip */}
+        <button
+          data-node
+          className="shrink-0 flex items-center justify-center border-t border-border transition-colors duration-150 hover:bg-white/[0.03]"
+          style={{ height: 22 }}
+          onClick={onToggleCard}
+          aria-label={isCardEx ? "Hide image" : "Show image"}
+        >
+          <ChevronDown
+            size={10}
+            className="text-muted-foreground"
+            style={{
+              transform: isCardEx ? "rotate(180deg)" : "rotate(0deg)",
+              transition: "transform 0.22s ease",
+            }}
+          />
+        </button>
+      </div>
+    );
+
+    // Shared positional style
+    const posStyle: React.CSSProperties = {
+      position: "absolute",
+      left: 0,
+      top: 0,
+      width: NODE_W,
+    };
+
+    if (useAnimations) {
+      return (
+        <motion.div
+          key={node.id}
+          initial={{ opacity: 0, scale: 0.88, x: node.x, y: node.y, height: node.height }}
+          animate={{ opacity: 1, scale: 1,   x: node.x, y: node.y, height: node.height }}
+          exit={{ opacity: 0, scale: 0.88 }}
+          transition={{ duration: 0.22, ease: [0.25, 0.46, 0.45, 0.94] }}
+          style={posStyle}
+          data-node
+          onClick={onSelect}
+        >
+          {inner}
+        </motion.div>
+      );
+    }
+
+    return (
+      <div
+        key={node.id}
+        style={{ ...posStyle, transform: `translate(${node.x}px, ${node.y}px)`, height: node.height }}
+        data-node
+        onClick={onSelect}
+      >
+        {inner}
+      </div>
+    );
+  },
+  // Custom equality — only re-render when something the card actually shows has changed
+  (prev, next) =>
+    prev.node.id     === next.node.id &&
+    prev.node.x      === next.node.x &&
+    prev.node.y      === next.node.y &&
+    prev.node.height === next.node.height &&
+    prev.isTreeEx    === next.isTreeEx &&
+    prev.isCardEx    === next.isCardEx &&
+    prev.isSel       === next.isSel &&
+    prev.isAltOpen   === next.isAltOpen &&
+    prev.altLoading  === next.altLoading &&
+    prev.useAnimations === next.useAnimations
+);
+
+// ─── Main component ───────────────────────────────────────────────────────────
 
 const INIT_EXPANDED = new Set<string>(["root", "frontend", "gateway", "services", "data"]);
+const VIEWPORT_PAD = 120;
 
 export default function App() {
   const [overrides, setOverrides] = useState<Record<string, number>>({});
@@ -290,20 +493,30 @@ export default function App() {
   const [pan, setPan] = useState({ x: 48, y: 56 });
   const [searchQuery, setSearchQuery] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [viewportSize, setViewportSize] = useState({ w: window.innerWidth, h: window.innerHeight });
 
   const isPanning = useRef(false);
   const dragOrigin = useRef({ mx: 0, my: 0, px: 0, py: 0 });
+  // for panel throttling
+  const rafId = useRef<number | null>(null);
+  const pendingPan = useRef({ x: 48, y: 56 });
   const [panActive, setPanActive] = useState(false);
 
-  // Load manifest eagerly on mount, then load default item
+  // Track viewport size for culling
+  useEffect(() => {
+    const onResize = () => setViewportSize({ w: window.innerWidth, h: window.innerHeight });
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  // Load manifest + default item on mount
   useEffect(() => {
     const defaultItem = "melter";
     setSearchQuery(defaultItem);
     setIsLoading(true);
-
     (async () => {
       try {
-        await getManifest(); // prime manifest cache
+        await getManifest();
         const { displayTree, rawTree, recipes } = await loadTree(defaultItem);
         const unique = assignUniqueIds(displayTree);
         setTreeRoot(unique);
@@ -324,20 +537,44 @@ export default function App() {
   );
   const byId = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
 
+  // ── Performance flags ──────────────────────────────────────────────────────
+  const useAnimations = nodes.length < 200;
+
+  // ── Viewport culling ───────────────────────────────────────────────────────
+  // Only render nodes whose bounding box overlaps the visible viewport.
+  const visibleNodes = useMemo(() => {
+    const { w, h } = viewportSize;
+    return nodes.filter(
+      (n) =>
+        n.x + pan.x < w + VIEWPORT_PAD &&
+        n.x + pan.x + NODE_W > -VIEWPORT_PAD &&
+        n.y + pan.y < h + VIEWPORT_PAD &&
+        n.y + pan.y + n.height > -VIEWPORT_PAD
+    );
+  }, [nodes, pan, viewportSize]);
+
+  const visibleIds = useMemo(() => new Set(visibleNodes.map((n) => n.id)), [visibleNodes]);
+
   const edges = useMemo(() => {
     const result: { fid: string; tid: string }[] = [];
     for (const n of nodes) {
       if (n.children && treeExpanded.has(n.id)) {
         for (const c of n.children) {
-          if (byId.has(c.id)) result.push({ fid: n.id, tid: c.id });
+          // Only draw edge if at least one endpoint is visible
+          if (byId.has(c.id) && (visibleIds.has(n.id) || visibleIds.has(c.id))) {
+            result.push({ fid: n.id, tid: c.id });
+          }
         }
       }
     }
     return result;
-  }, [nodes, byId, treeExpanded]);
+  }, [nodes, byId, treeExpanded, visibleIds]);
 
   const canvasW = nodes.reduce((m, n) => Math.max(m, n.x + NODE_W + 120), 600);
   const canvasH = nodes.reduce((m, n) => Math.max(m, n.y + n.height + 120), 400);
+  const totalNodes = useMemo(() => (treeRoot ? countAll(treeRoot) : 0), [treeRoot]);
+
+  // ── Callbacks ──────────────────────────────────────────────────────────────
 
   const toggleTree = useCallback((id: string) => {
     setTreeExpanded((p) => {
@@ -379,6 +616,8 @@ export default function App() {
     }
   };
 
+  // ── Pan — throttled to one setState per animation frame ───────────────────
+
   const onMouseDown = useCallback(
     (e: React.MouseEvent) => {
       if ((e.target as HTMLElement).closest("[data-node]")) return;
@@ -392,18 +631,30 @@ export default function App() {
 
   const onMouseMove = useCallback((e: React.MouseEvent) => {
     if (!isPanning.current) return;
-    setPan({
+    pendingPan.current = {
       x: dragOrigin.current.px + e.clientX - dragOrigin.current.mx,
       y: dragOrigin.current.py + e.clientY - dragOrigin.current.my,
-    });
+    };
+    if (rafId.current === null) {
+      rafId.current = requestAnimationFrame(() => {
+        setPan({ ...pendingPan.current });
+        rafId.current = null;
+      });
+    }
   }, []);
 
   const onMouseUp = useCallback(() => {
     isPanning.current = false;
     setPanActive(false);
+    if (rafId.current !== null) {
+      cancelAnimationFrame(rafId.current);
+      rafId.current = null;
+      // Flush any pending pan so final position is accurate
+      setPan({ ...pendingPan.current });
+    }
   }, []);
 
-  const totalNodes = useMemo(() => (treeRoot ? countAll(treeRoot) : 0), [treeRoot]);
+  // ── Alt panel ──────────────────────────────────────────────────────────────
 
   const handleAltClick = useCallback(
     async (e: React.MouseEvent, node: LayoutNode) => {
@@ -416,12 +667,11 @@ export default function App() {
       setAltPanel(null);
       try {
         const realId = node.itemId ?? node.id;
-        // Ensure the shard for this item is loaded
         await getRecipes(realId);
         const recipes = getLoadedRecipes();
         const options = getAlternatives(realId, recipes);
         setAltPanel({ nodeId: node.id, realItemId: realId, x: node.x + NODE_W + 8, y: node.y, options });
-      } catch (err) {
+      } catch {
         toast.error("Failed to load alternatives");
       } finally {
         setAltLoading(false);
@@ -459,14 +709,10 @@ export default function App() {
         const descendantItemIds = collectDescendantItemIds(uniqueTree, changedItemId);
 
         const prevExpandedItemIds = new Set(
-          [...treeExpanded]
-            .map((uid) => byId.get(uid)?.itemId)
-            .filter((iid): iid is string => !!iid)
+          [...treeExpanded].map((uid) => byId.get(uid)?.itemId).filter((iid): iid is string => !!iid)
         );
         const prevCardExpandedItemIds = new Set(
-          [...cardExpanded]
-            .map((uid) => byId.get(uid)?.itemId)
-            .filter((iid): iid is string => !!iid)
+          [...cardExpanded].map((uid) => byId.get(uid)?.itemId).filter((iid): iid is string => !!iid)
         );
 
         const newExpanded = new Set<string>();
@@ -498,6 +744,8 @@ export default function App() {
     [overrides, searchQuery, altPanel, treeExpanded, cardExpanded, byId]
   );
 
+  // ── Render ─────────────────────────────────────────────────────────────────
+
   return (
     <>
       <Toaster
@@ -515,6 +763,7 @@ export default function App() {
 
       <div className="size-full flex bg-background text-foreground overflow-hidden" style={{ fontFamily: "'Inter', sans-serif" }}>
         <div className="flex-1 flex flex-col min-w-0">
+
           {/* ── Toolbar ── */}
           <header className="shrink-0 flex items-center gap-3 border-b border-border px-4 h-12">
             <div className="flex items-center gap-2 shrink-0">
@@ -548,7 +797,7 @@ export default function App() {
 
             <div className="flex items-center gap-2 shrink-0 ml-auto">
               <span className="text-xs text-muted-foreground tabular-nums mr-1" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
-                Total Nodes: {nodes.length}&thinsp;/&thinsp;{totalNodes}
+                {visibleNodes.length}&thinsp;/&thinsp;{nodes.length}&thinsp;/&thinsp;{totalNodes}
               </span>
               {(
                 [
@@ -677,123 +926,45 @@ export default function App() {
                 )}
 
                 {/* Nodes */}
-                <AnimatePresence>
-                  {nodes.map((node) => {
-                    const cfg = TYPE_CONFIG[node.type];
-                    const isTreeEx = treeExpanded.has(node.id);
-                    const isCardEx = cardExpanded.has(node.id);
-                    const isSel = selected === node.id;
-                    const hasKids = !!node.children?.length;
-
-                    return (
-                      <motion.div
+                {useAnimations ? (
+                  <AnimatePresence>
+                    {visibleNodes.map((node) => (
+                      <NodeCard
                         key={node.id}
-                        initial={{ opacity: 0, scale: 0.88, x: node.x, y: node.y, height: node.height }}
-                        animate={{ opacity: 1, scale: 1,  x: node.x, y: node.y, height: node.height }}
-                        exit={{ opacity: 0, scale: 0.88 }}
-                        transition={{ duration: 0.22, ease: [0.25, 0.46, 0.45, 0.94] }}
-                        style={{ position: "absolute", left: 0, top: 0, width: NODE_W }}
-                        data-node
-                        onClick={() => setSelected(isSel ? null : node.id)}
-                      >
-                        <div
-                          className="w-full h-full flex flex-col rounded-lg overflow-hidden transition-shadow duration-150"
-                          style={{
-                            background: isSel ? "rgba(34,211,238,0.045)" : "var(--card)",
-                            border: `1px solid ${isSel ? "rgba(34,211,238,0.42)" : "rgba(255,255,255,0.07)"}`,
-                            boxShadow: isSel
-                              ? "inset 3px 0 0 rgba(34,211,238,0.65), 0 4px 24px rgba(0,0,0,0.45)"
-                              : "0 2px 12px rgba(0,0,0,0.3)",
-                            cursor: "pointer",
-                          }}
-                        >
-                          <div className="flex-1 flex flex-col justify-center px-3.5 pt-2.5 pb-2 min-h-0">
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="flex items-center gap-2 min-w-0">
-                                <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: cfg.dot }} />
-                                <span className="text-[13px] font-medium text-foreground truncate leading-tight">{node.label}</span>
-                              </div>
-                              <div className="flex items-center gap-0.5 shrink-0">
-                                {node.type !== "resource" && (
-                                  <button
-                                    data-node
-                                    className="w-[22px] h-[22px] flex items-center justify-center rounded hover:bg-white/5 transition-colors text-muted-foreground hover:text-foreground"
-                                    style={altPanel?.nodeId === node.id ? { color: "#22d3ee" } : {}}
-                                    onClick={(e) => handleAltClick(e, node)}
-                                    aria-label="Show alternative recipes"
-                                    title="Alternatives"
-                                  >
-                                    {altLoading && altPanel === null ? (
-                                      <Loader2 size={10} className="animate-spin" />
-                                    ) : (
-                                      <span style={{ fontSize: 11 }}>⇄</span>
-                                    )}
-                                  </button>
-                                )}
-                              </div>
-                              {hasKids && (
-                                <button
-                                  data-node
-                                  className="shrink-0 w-[22px] h-[22px] flex items-center justify-center rounded hover:bg-white/5 transition-colors"
-                                  style={{ color: isTreeEx ? cfg.dot : "rgba(255,255,255,0.28)" }}
-                                  onClick={(e) => { e.stopPropagation(); toggleTree(node.id); }}
-                                  aria-label={isTreeEx ? "Collapse children" : "Expand children"}
-                                >
-                                  <ChevronRight size={11} style={{ transform: isTreeEx ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.2s ease" }} />
-                                </button>
-                              )}
-                            </div>
-                            <div className="flex items-center gap-2 mt-2">
-                              {node.meta && (
-                                <span className="text-[10px] px-1.5 py-px rounded leading-none" style={{ background: cfg.badge, color: cfg.text, fontFamily: "'JetBrains Mono', monospace" }}>
-                                  {node.meta}
-                                </span>
-                              )}
-                              {hasKids && (
-                                <span className="text-[10px] text-muted-foreground leading-none" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
-                                  {node.children!.length}&thinsp;children
-                                </span>
-                              )}
-                            </div>
-                          </div>
-
-                          <AnimatePresence>
-                            {isCardEx && (
-                              <motion.div
-                                key="img"
-                                initial={{ opacity: 0 }}
-                                animate={{ opacity: 1 }}
-                                exit={{ opacity: 0 }}
-                                transition={{ duration: 0.15 }}
-                                className="border-t border-border overflow-hidden"
-                                style={{ height: NODE_H_IMAGE }}
-                              >
-                                {node.imageUrl ? (
-                                  <img src={node.imageUrl} alt={node.label} className="w-full h-full object-contain" draggable={false} />
-                                ) : (
-                                  <div className="w-full h-full flex flex-col items-center justify-center gap-2" style={{ background: "rgba(255,255,255,0.02)" }}>
-                                    <ImageOff size={18} className="text-muted-foreground opacity-40" />
-                                    <span className="text-[10px] text-muted-foreground opacity-50" style={{ fontFamily: "'JetBrains Mono', monospace" }}>no image</span>
-                                  </div>
-                                )}
-                              </motion.div>
-                            )}
-                          </AnimatePresence>
-
-                          <button
-                            data-node
-                            className="shrink-0 flex items-center justify-center border-t border-border transition-colors duration-150 hover:bg-white/[0.03]"
-                            style={{ height: 22 }}
-                            onClick={(e) => { e.stopPropagation(); toggleCard(node.id); }}
-                            aria-label={isCardEx ? "Hide image" : "Show image"}
-                          >
-                            <ChevronDown size={10} className="text-muted-foreground" style={{ transform: isCardEx ? "rotate(180deg)" : "rotate(0deg)", transition: "transform 0.22s ease" }} />
-                          </button>
-                        </div>
-                      </motion.div>
-                    );
-                  })}
-                </AnimatePresence>
+                        node={node}
+                        isTreeEx={treeExpanded.has(node.id)}
+                        isCardEx={cardExpanded.has(node.id)}
+                        isSel={selected === node.id}
+                        isAltOpen={altPanel?.nodeId === node.id}
+                        altLoading={altLoading && altPanel === null}
+                        useAnimations={useAnimations}
+                        onSelect={() => setSelected(selected === node.id ? null : node.id)}
+                        onToggleTree={(e) => { e.stopPropagation(); toggleTree(node.id); }}
+                        onToggleCard={(e) => { e.stopPropagation(); toggleCard(node.id); }}
+                        onAltClick={(e) => handleAltClick(e, node)}
+                      />
+                    ))}
+                  </AnimatePresence>
+                ) : (
+                  <>
+                    {visibleNodes.map((node) => (
+                      <NodeCard
+                        key={node.id}
+                        node={node}
+                        isTreeEx={treeExpanded.has(node.id)}
+                        isCardEx={cardExpanded.has(node.id)}
+                        isSel={selected === node.id}
+                        isAltOpen={altPanel?.nodeId === node.id}
+                        altLoading={altLoading && altPanel === null}
+                        useAnimations={useAnimations}
+                        onSelect={() => setSelected(selected === node.id ? null : node.id)}
+                        onToggleTree={(e) => { e.stopPropagation(); toggleTree(node.id); }}
+                        onToggleCard={(e) => { e.stopPropagation(); toggleCard(node.id); }}
+                        onAltClick={(e) => handleAltClick(e, node)}
+                      />
+                    ))}
+                  </>
+                )}
               </div>
             </div>
           )}
