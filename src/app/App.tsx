@@ -998,7 +998,9 @@ export default function App() {
               <div className="text-center text-xs text-muted-foreground py-8">No materials loaded</div>
             ) : (
               <div className="space-y-1.5">
-                {Object.entries(items).map(([key, item]) => (
+                {Object.entries(items)
+                  .sort(([, a], [, b]) => b.qty - a.qty)
+                  .map(([key, item]) => (
                   <div key={key} className="flex items-center justify-between px-3 py-2 rounded-lg border border-border" style={{ background: "var(--card)" }}>
                     <span className="text-xs text-foreground truncate mr-2" title={item.name}>{item.name}</span>
                     <span className="text-xs tabular-nums shrink-0 px-1.5 py-0.5 rounded" style={{ background: "rgba(148,163,184,0.1)", color: "#94a3b8", fontFamily: "'JetBrains Mono', monospace" }}>
