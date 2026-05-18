@@ -1,0 +1,1 @@
+{"item:itemfilters:filter":[{"id":8432,"c":"minecraft.crafting","cn":"Crafting","ip":"data/locales/en_us/categories/minecraft.crafting/recipe_8431.png","o":[{"id":"item:itemfilters:filter","name":"Item Filter","qty":8}],"in":[{"id":"item:mod_lavacow:curseweave_cloth","qty":8,"name":"Curseweave Cloth"},{"id":"item:minecraft:wool:0","qty":1,"name":"White Wool"}]}]}

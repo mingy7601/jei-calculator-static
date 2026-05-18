@@ -1,0 +1,1 @@
+{"item:hammercore:manual":[{"id":6925,"c":"minecraft.crafting","cn":"Crafting","ip":"data/locales/en_us/categories/minecraft.crafting/recipe_6924.png","o":[{"id":"item:hammercore:manual","name":"Hammer Core Manual","qty":1}],"in":[{"id":"item:minecraft:writable_book","qty":1,"name":"Book and Quill"},{"id":"item:railcraft:gear:1","qty":1,"name":"Iron Gear"}]}]}

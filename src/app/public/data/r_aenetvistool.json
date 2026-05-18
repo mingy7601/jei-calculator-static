@@ -1,0 +1,1 @@
+{"item:aenetvistool:net_visualizer":[{"id":25832,"c":"minecraft.crafting","cn":"Crafting","ip":"data/locales/en_us/categories/minecraft.crafting/recipe_25831.png","o":[{"id":"item:aenetvistool:net_visualizer","name":"Network Visualization Tool","qty":1}],"in":[{"id":"item:ae2stuff:visualiser","qty":1,"name":"Network Visualisation Tool"}]}]}

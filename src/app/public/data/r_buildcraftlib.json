@@ -1,0 +1,1 @@
+{"item:buildcraftlib:guide":[{"id":1548,"c":"minecraft.crafting","cn":"Crafting","ip":"data/locales/en_us/categories/minecraft.crafting/recipe_1547.png","o":[{"id":"item:buildcraftlib:guide","name":"BuildCraft Guide Book","qty":1}],"in":[{"id":"item:enderio:item_material:9","qty":1,"name":"Wooden Gear"},{"id":"item:minecraft:paper","qty":3,"name":"Paper"}]}]}
