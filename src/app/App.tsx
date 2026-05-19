@@ -54,6 +54,12 @@ interface TreeNode {
   children?: TreeNode[];
 }
 
+interface LeafGroup {
+  itemId: string;
+  leaves: LayoutNode[];
+  selectedIndex: number;
+}
+
 interface AltOption {
   recipe_id: number;
   category_name: string;
@@ -158,8 +164,7 @@ function countAll(node: TreeNode): number {
 
 // ─── Convert raw TreeNode → display TreeNode ──────────────────────────────────
 
-const MAX_STEPS = 5;
-
+const MAX_STEPS = 5; 
 function rawToDisplay(node: RawTreeNode, isRoot = false): TreeNode {
   const itemId = node.item ?? "unknown";
   const source = node.source;
@@ -256,6 +261,7 @@ interface NodeCardProps {
   isTreeEx: boolean;
   isCardEx: boolean;
   isSel: boolean;
+  isHighlighted: boolean;
   isAltOpen: boolean;
   altLoading: boolean;
   useAnimations: boolean;
@@ -271,6 +277,7 @@ const NodeCard = memo(
     isTreeEx,
     isCardEx,
     isSel,
+    isHighlighted,
     isAltOpen,
     altLoading,
     useAnimations,
@@ -286,10 +293,22 @@ const NodeCard = memo(
       <div
         className="w-full h-full flex flex-col rounded-lg overflow-hidden transition-shadow duration-150"
         style={{
-          background: isSel ? "rgba(34,211,238,0.045)" : "var(--card)",
-          border: `1px solid ${isSel ? "rgba(34,211,238,0.42)" : "rgba(255,255,255,0.07)"}`,
+          background: isSel
+            ? "rgba(34,211,238,0.045)"
+            : isHighlighted
+            ? "rgba(34,211,238,0.08)"
+            : "var(--card)",
+          border: `1px solid ${
+            isSel
+              ? "rgba(34,211,238,0.42)"
+              : isHighlighted
+              ? "#22d3ee"
+              : "rgba(255,255,255,0.07)"
+          }`,
           boxShadow: isSel
             ? "inset 3px 0 0 rgba(34,211,238,0.65), 0 4px 24px rgba(0,0,0,0.45)"
+            : isHighlighted
+            ? "0 0 20px rgba(34,211,238,0.35), 0 0 40px rgba(34,211,238,0.12), 0 2px 12px rgba(0,0,0,0.3)"
             : "0 2px 12px rgba(0,0,0,0.3)",
           cursor: "pointer",
         }}
@@ -302,24 +321,6 @@ const NodeCard = memo(
               <span className="text-[13px] font-medium text-foreground truncate leading-tight">
                 {node.label}
               </span>
-            </div>
-            <div className="flex items-center gap-0.5 shrink-0">
-              {node.type !== "resource" && (
-                <button
-                  data-node
-                  className="w-[22px] h-[22px] flex items-center justify-center rounded hover:bg-white/5 transition-colors text-muted-foreground hover:text-foreground"
-                  style={isAltOpen ? { color: "#22d3ee" } : {}}
-                  onClick={onAltClick}
-                  aria-label="Show alternative recipes"
-                  title="Alternatives"
-                >
-                  {altLoading ? (
-                    <Loader2 size={10} className="animate-spin" />
-                  ) : (
-                    <span style={{ fontSize: 11 }}>⇄</span>
-                  )}
-                </button>
-              )}
             </div>
             {hasKids && (
               <button
@@ -347,6 +348,22 @@ const NodeCard = memo(
               >
                 {node.meta}
               </span>
+            )}
+            {node.type !== "resource" && (
+              <button
+                data-node
+                className="shrink-0 flex items-center justify-center w-[22px] h-[22px] rounded hover:bg-white/5 transition-colors text-muted-foreground hover:text-foreground"
+                style={isAltOpen ? { color: "#22d3ee" } : {}}
+                onClick={onAltClick}
+                aria-label="Show alternative recipes"
+                title="Alternatives"
+              >
+                {altLoading ? (
+                  <Loader2 size={10} className="animate-spin" />
+                ) : (
+                  <span style={{ fontSize: 11 }}>⇄</span>
+                )}
+              </button>
             )}
             {hasKids && (
               <span
@@ -454,16 +471,17 @@ const NodeCard = memo(
   },
   // Custom equality — only re-render when something the card actually shows has changed
   (prev, next) =>
-    prev.node.id     === next.node.id &&
-    prev.node.x      === next.node.x &&
-    prev.node.y      === next.node.y &&
-    prev.node.height === next.node.height &&
-    prev.isTreeEx    === next.isTreeEx &&
-    prev.isCardEx    === next.isCardEx &&
-    prev.isSel       === next.isSel &&
-    prev.isAltOpen   === next.isAltOpen &&
-    prev.altLoading  === next.altLoading &&
-    prev.useAnimations === next.useAnimations
+    prev.node.id         === next.node.id &&
+    prev.node.x          === next.node.x &&
+    prev.node.y          === next.node.y &&
+    prev.node.height     === next.node.height &&
+    prev.isTreeEx        === next.isTreeEx &&
+    prev.isCardEx        === next.isCardEx &&
+    prev.isSel           === next.isSel &&
+    prev.isHighlighted   === next.isHighlighted &&
+    prev.isAltOpen       === next.isAltOpen &&
+    prev.altLoading      === next.altLoading &&
+    prev.useAnimations   === next.useAnimations
 );
 
 // ─── Main component ───────────────────────────────────────────────────────────
@@ -489,6 +507,15 @@ export default function App() {
   const [treeExpanded, setTreeExpanded] = useState<Set<string>>(INIT_EXPANDED);
   const [cardExpanded, setCardExpanded] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<string | null>(null);
+
+  // Sidebar raw material → leaf node cycling
+  const [leafGroups, setLeafGroups] = useState<Record<string, LeafGroup>>({});
+
+  // Highlight search
+  const [highlightSearch, setHighlightSearch] = useState("");
+  const [highlightedIds, setHighlightedIds] = useState<Set<string>>(new Set());
+  const [highlightMatchList, setHighlightMatchList] = useState<LayoutNode[]>([]);
+  const [highlightIdx, setHighlightIdx] = useState(-1);
   const [pan, setPan] = useState({ x: 48, y: 56 });
   const [searchQuery, setSearchQuery] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -510,7 +537,7 @@ export default function App() {
 
   // Load manifest + default item on mount
   useEffect(() => {
-    const defaultItem = "melter";
+    const defaultItem = "mythic machine case";
     setSearchQuery(defaultItem);
     setIsLoading(true);
     (async () => {
@@ -554,20 +581,82 @@ export default function App() {
 
   const visibleIds = useMemo(() => new Set(visibleNodes.map((n) => n.id)), [visibleNodes]);
 
+  // ── Count leaves per item from the full tree (even when collapsed) ──────
+  const leafCountPerItem = useMemo(() => {
+    if (!treeRoot) return new Map<string, number>();
+    const counts = new Map<string, number>();
+    function walk(n: TreeNode) {
+      if (!n.children?.length) {
+        const iid = n.itemId ?? n.id;
+        counts.set(iid, (counts.get(iid) ?? 0) + 1);
+      } else {
+        for (const c of n.children) walk(c);
+      }
+    }
+    walk(treeRoot);
+    return counts;
+  }, [treeRoot]);
+
+  // ── Leaf groups for cycling (from expanded nodes only) ──────────────────
+  const leafGroupsComputed = useMemo(() => {
+    const groups = new Map<string, LayoutNode[]>();
+    for (const n of nodes) {
+      const isLeaf = !n.children?.length;
+      if (isLeaf) {
+        const iid = n.itemId ?? n.id;
+        if (!groups.has(iid)) groups.set(iid, []);
+        groups.get(iid)!.push(n);
+      }
+    }
+    const result: Record<string, LeafGroup> = {};
+    for (const [itemId, leaves] of groups) {
+      result[itemId] = { itemId, leaves, selectedIndex: 0 };
+    }
+    return result;
+  }, [nodes]);
+
+  // Merge with user state (selectedIndex)
+  const leafGroupsMerged = useMemo(() => {
+    const merged = { ...leafGroups };
+    for (const [itemId, group] of Object.entries(leafGroupsComputed)) {
+      if (!merged[itemId]) {
+        merged[itemId] = { ...group, selectedIndex: 0 };
+      } else {
+        merged[itemId] = { ...group, selectedIndex: merged[itemId].selectedIndex };
+      }
+    }
+    return merged;
+  }, [leafGroupsComputed, leafGroups]);
+
+  // ── Which raw materials are EMC-type? (from full tree, not just expanded) ─
+  const emcItems = useMemo(() => {
+    const set = new Set<string>();
+    if (!treeRoot) return set;
+    function walk(n: TreeNode) {
+      if (n.type === "emc") {
+        set.add(n.itemId ?? n.id);
+      }
+      n.children?.forEach(walk);
+    }
+    walk(treeRoot);
+    return set;
+  }, [treeRoot]);
+
   const edges = useMemo(() => {
-    const result: { fid: string; tid: string }[] = [];
+    const result: { fid: string; tid: string; isHighlighted: boolean }[] = [];
     for (const n of nodes) {
       if (n.children && treeExpanded.has(n.id)) {
         for (const c of n.children) {
           // Only draw edge if at least one endpoint is visible
           if (byId.has(c.id) && (visibleIds.has(n.id) || visibleIds.has(c.id))) {
-            result.push({ fid: n.id, tid: c.id });
+            const isHighlighted = highlightedIds.has(n.id) || highlightedIds.has(c.id);
+            result.push({ fid: n.id, tid: c.id, isHighlighted });
           }
         }
       }
     }
     return result;
-  }, [nodes, byId, treeExpanded, visibleIds]);
+  }, [nodes, byId, treeExpanded, visibleIds, highlightedIds]);
 
   const canvasW = nodes.reduce((m, n) => Math.max(m, n.x + NODE_W + 120), 600);
   const canvasH = nodes.reduce((m, n) => Math.max(m, n.y + n.height + 120), 400);
@@ -691,6 +780,90 @@ export default function App() {
     return out;
   }
 
+  // ── Sidebar raw material click → cycle through leaf nodes ────────────────
+  const handleLeafClick = useCallback(
+    (itemId: string) => {
+      // If no leaves exist for this item in the full tree, nothing to do
+      if (!treeRoot || (leafCountPerItem.get(itemId) ?? 0) === 0) return;
+
+      const group = leafGroupsMerged[itemId];
+      const hasVisibleLeaves = group && group.leaves.length > 0;
+
+      // If leaves aren't visible (tree collapsed), expand the path to the first leaf
+      if (!hasVisibleLeaves) {
+        const firstLeaf = findFirstLeaf(treeRoot, itemId);
+        if (firstLeaf) {
+          const ancestors = new Set<string>();
+          function walk(n: TreeNode) {
+            if (n.id === firstLeaf.id) { ancestors.add(n.id); return true; }
+            if (n.children) {
+              for (const c of n.children) {
+                if (walk(c)) { ancestors.add(n.id); return true; }
+              }
+            }
+            return false;
+          }
+          walk(treeRoot);
+          setTreeExpanded((prev) => {
+            const next = new Set(prev);
+            for (const a of ancestors) next.add(a);
+            return next;
+          });
+        }
+        return; // Will re-enter after tree expands
+      }
+
+      const nextIndex = (group.selectedIndex + 1) % group.leaves.length;
+      setLeafGroups((prev) => ({
+        ...prev,
+        [itemId]: { ...group, selectedIndex: nextIndex },
+      }));
+
+      const targetNode = group.leaves[nextIndex];
+
+      // Expand all ancestor nodes on the path to the target leaf
+      const ancestors = new Set<string>();
+      function walk(n: TreeNode) {
+        if (n.id === targetNode.id) { ancestors.add(n.id); return true; }
+        if (n.children) {
+          for (const c of n.children) {
+            if (walk(c)) { ancestors.add(n.id); return true; }
+          }
+        }
+        return false;
+      }
+      walk(treeRoot);
+      setTreeExpanded((prev) => {
+        const next = new Set(prev);
+        for (const a of ancestors) next.add(a);
+        return next;
+      });
+
+      // Center the node in the viewport: screenPos = nodePos + pan
+      // We want screenPos = viewportSize / 2, so pan = viewportSize/2 - nodePos
+      setPan({
+        x: viewportSize.w / 2 - targetNode.x,
+        y: viewportSize.h / 2 - targetNode.y,
+      });
+      setSelected(targetNode.id);
+    },
+    [leafGroupsMerged, viewportSize, treeRoot, leafCountPerItem]
+  );
+
+  // ── Find first leaf with matching itemId in a tree ──────────────────────
+  function findFirstLeaf(node: TreeNode, targetItemId: string): TreeNode | null {
+    if ((node.itemId ?? node.id) === targetItemId && !node.children?.length) {
+      return node;
+    }
+    if (node.children) {
+      for (const c of node.children) {
+        const found = findFirstLeaf(c, targetItemId);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
   const handleSelectAlt = useCallback(
     async (itemId: string, recipeId: number) => {
       const newOverrides = { ...overrides, [altPanel!.realItemId]: recipeId };
@@ -742,6 +915,69 @@ export default function App() {
     },
     [overrides, searchQuery, altPanel, treeExpanded, cardExpanded, byId]
   );
+
+  // ── Highlight search (applied on Enter, cycles on subsequent Enter) ────
+  const handleHighlightKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLInputElement>) => {
+      if (e.key !== "Enter") return;
+      const raw = e.currentTarget.value;
+      const q = raw.trim().toLowerCase();
+      setHighlightSearch(raw.trim());
+
+      if (!q) {
+        setHighlightedIds(new Set());
+        setHighlightMatchList([]);
+        setHighlightIdx(-1);
+        return;
+      }
+
+      // If we already have a match list, cycle to next match
+      if (highlightMatchList.length > 0) {
+        const nextIdx = (highlightIdx + 1) % highlightMatchList.length;
+        setHighlightIdx(nextIdx);
+        const target = highlightMatchList[nextIdx];
+        setPan({
+          x: viewportSize.w / 2 - target.x,
+          y: viewportSize.h / 2 - target.y,
+        });
+        return;
+      }
+
+      // Compute new matches
+      const matches: LayoutNode[] = [];
+      for (const n of nodes) {
+        if (
+          n.label.toLowerCase().includes(q) ||
+          (n.itemId && n.itemId.toLowerCase().includes(q))
+        ) {
+          matches.push(n);
+        }
+      }
+      setHighlightMatchList(matches);
+      setHighlightedIds(new Set(matches.map((n) => n.id)));
+      setHighlightIdx(0);
+
+      if (matches.length > 0) {
+        setPan({
+          x: viewportSize.w / 2 - matches[0].x,
+          y: viewportSize.h / 2 - matches[0].y,
+        });
+      }
+    },
+    [nodes, highlightMatchList, highlightIdx, viewportSize]
+  );
+
+  const handleHighlightClear = useCallback(() => {
+    setHighlightSearch("");
+    setHighlightedIds(new Set());
+    setHighlightMatchList([]);
+    setHighlightIdx(-1);
+  }, []);
+
+  const clearHighlightSearch = useCallback(() => {
+    setHighlightSearch("");
+    setHighlightedIds(new Set());
+  }, []);
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
@@ -796,7 +1032,7 @@ export default function App() {
 
             <div className="flex items-center gap-2 shrink-0 ml-auto">
               <span className="text-xs text-muted-foreground tabular-nums mr-1" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
-                {visibleNodes.length}&thinsp;/&thinsp;{nodes.length}&thinsp;/&thinsp;{totalNodes}
+                {visibleNodes.length} visible / {nodes.length} expanded / {totalNodes} total
               </span>
               {(
                 [
@@ -821,6 +1057,34 @@ export default function App() {
                 <span className="text-[11px] text-muted-foreground" style={{ fontFamily: "'JetBrains Mono', monospace" }}>{label}</span>
               </div>
             ))}
+          </div>
+
+          {/* ── Highlight Search ── */}
+          <div className="shrink-0 flex items-center gap-2 px-4 h-9 border-b border-border">
+            <Search size={11} className="text-muted-foreground shrink-0" />
+            <input
+              type="text"
+              value={highlightSearch}
+              onChange={(e) => setHighlightSearch(e.target.value)}
+              onKeyDown={handleHighlightKeyDown}
+              placeholder="Press Enter to highlight nodes…"
+              className="flex-1 h-5 px-2 text-[11px] rounded border border-border bg-transparent text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-[rgba(34,211,238,0.4)] transition-colors"
+              style={{ fontFamily: "'JetBrains Mono', monospace" }}
+            />
+            {highlightedIds.size > 0 && (
+              <>
+                <span className="text-[10px] text-muted-foreground tabular-nums" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
+                  {highlightedIds.size} match{highlightedIds.size !== 1 ? "es" : ""}
+                </span>
+                <button
+                  onClick={handleHighlightClear}
+                  className="text-[10px] text-muted-foreground hover:text-foreground transition-colors shrink-0"
+                  title="Clear highlight"
+                >
+                  ✕
+                </button>
+              </>
+            )}
           </div>
 
           {/* ── Canvas ── */}
@@ -852,7 +1116,7 @@ export default function App() {
               <div style={{ position: "absolute", transform: `translate(${pan.x}px, ${pan.y}px)`, width: canvasW, height: canvasH }}>
                 {/* SVG edges */}
                 <svg style={{ position: "absolute", inset: 0, width: canvasW, height: canvasH, overflow: "visible", pointerEvents: "none" }} aria-hidden>
-                  {edges.map(({ fid, tid }) => {
+                  {edges.map(({ fid, tid, isHighlighted }) => {
                     const f = byId.get(fid);
                     const t = byId.get(tid);
                     if (!f || !t) return null;
@@ -862,13 +1126,19 @@ export default function App() {
                     const y2 = t.y + t.height / 2;
                     const mx = (x1 + x2) / 2;
                     const isActive = selected === fid || selected === tid;
+                    const strokeColor = isActive
+                      ? "#22d3ee"
+                      : isHighlighted
+                      ? "rgba(34,211,238,0.55)"
+                      : "rgba(255,255,255,0.085)";
+                    const strokeWidth = isActive ? 2 : isHighlighted ? 1.5 : 1;
                     return (
                       <path
                         key={`${fid}-${tid}`}
                         d={`M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`}
                         fill="none"
-                        stroke={isActive ? "rgba(34,211,238,0.55)" : "rgba(255,255,255,0.085)"}
-                        strokeWidth={isActive ? 1.5 : 1}
+                        stroke={strokeColor}
+                        strokeWidth={strokeWidth}
                       />
                     );
                   })}
@@ -934,6 +1204,7 @@ export default function App() {
                         isTreeEx={treeExpanded.has(node.id)}
                         isCardEx={cardExpanded.has(node.id)}
                         isSel={selected === node.id}
+                        isHighlighted={highlightedIds.has(node.id)}
                         isAltOpen={altPanel?.nodeId === node.id}
                         altLoading={altLoading && altPanel === null}
                         useAnimations={useAnimations}
@@ -953,6 +1224,7 @@ export default function App() {
                         isTreeEx={treeExpanded.has(node.id)}
                         isCardEx={cardExpanded.has(node.id)}
                         isSel={selected === node.id}
+                        isHighlighted={highlightedIds.has(node.id)}
                         isAltOpen={altPanel?.nodeId === node.id}
                         altLoading={altLoading && altPanel === null}
                         useAnimations={useAnimations}
@@ -999,14 +1271,45 @@ export default function App() {
               <div className="space-y-1.5">
                 {Object.entries(items)
                   .sort(([, a], [, b]) => b.qty - a.qty)
-                  .map(([key, item]) => (
-                  <div key={key} className="flex items-center justify-between px-3 py-2 rounded-lg border border-border" style={{ background: "var(--card)" }}>
-                    <span className="text-xs text-foreground truncate mr-2" title={item.name}>{item.name}</span>
-                    <span className="text-xs tabular-nums shrink-0 px-1.5 py-0.5 rounded" style={{ background: "rgba(148,163,184,0.1)", color: "#94a3b8", fontFamily: "'JetBrains Mono', monospace" }}>
-                      ×{item.qty % 1 === 0 ? item.qty.toFixed(0) : item.qty.toFixed(1)}
-                    </span>
-                  </div>
-                ))}
+                  .map(([key, item]) => {
+                    const group = leafGroupsMerged[key];
+                    const leafCount = leafCountPerItem.get(key) ?? 0;
+                    const cycleIdx = group ? group.selectedIndex : -1;
+                    const hasEmc = emcItems.has(key);
+                    return (
+                    <div
+                      key={key}
+                      className="flex items-center px-3 py-2 rounded-lg border border-border cursor-pointer hover:bg-white/[0.03] transition-colors"
+                      style={{ background: "var(--card)" }}
+                      onClick={() => handleLeafClick(key)}
+                    >
+                      <span className="text-xs text-foreground truncate flex-1 min-w-0 mr-2" title={item.name}>{item.name}</span>
+                      <span className="text-[10px] shrink-0 px-1 py-px rounded" style={{ background: "rgba(148,163,184,0.1)", color: "#94a3b8", fontFamily: "'JetBrains Mono', monospace" }}>
+                        ×{item.qty % 1 === 0 ? item.qty.toFixed(0) : item.qty.toFixed(1)}
+                      </span>
+                      {leafCount > 0 && (
+                        <span
+                          className="text-[10px] shrink-0 px-1 py-px rounded"
+                          style={{ background: "rgba(34,211,238,0.1)", color: "#22d3ee", fontFamily: "'JetBrains Mono', monospace" }}
+                          title="Click to cycle through nodes"
+                        >
+                          {group ? `${cycleIdx + 1}/${leafCount}` : `1/${leafCount}`}
+                        </span>
+                      )}
+                      <span
+                        className="text-[10px] shrink-0 px-1 py-px rounded"
+                        style={{
+                          background: hasEmc ? "rgba(168,85,247,0.15)" : "rgba(255,255,255,0.03)",
+                          color: hasEmc ? "#a855f7" : "transparent",
+                          fontFamily: "'JetBrains Mono', monospace",
+                        }}
+                        title={hasEmc ? "Has EMC value" : undefined}
+                      >
+                        emc
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
