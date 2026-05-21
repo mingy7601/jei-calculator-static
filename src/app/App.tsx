@@ -1,12 +1,14 @@
 /**
- * App.tsx — static version (no Flask backend)
+ * App.tsx — canvas-rendered version
  *
- * Performance improvements over previous version:
- *   1. Viewport culling   — only render nodes visible in the current pan window
- *   2. NodeCard memo      — individual cards skip re-render when props unchanged
- *   3. Pan throttle       — mousemove capped at ~60 fps via requestAnimationFrame
- *   4. Animation toggle   — AnimatePresence disabled when nodes >= 200
- *   5. Edge culling       — only draw edges where at least one endpoint is visible
+ * Performance architecture:
+ *   1. Canvas layer — all edges + node rectangles drawn on a single <canvas>
+ *      (O(n) draw calls instead of O(n) DOM nodes)
+ *   2. HTML overlay — only the hovered/selected node rendered as HTML
+ *      (keeps image panels, text selection, and click interaction working)
+ *   3. Pan + zoom — transform matrix with scroll-wheel zoom
+ *   4. Viewport culling — only draw visible nodes on canvas
+ *   5. Lazy tree loading — only build visible subtree initially, expand on demand
  */
 
 import {
@@ -15,16 +17,9 @@ import {
   useRef,
   useCallback,
   useMemo,
-  memo,
+  useLayoutEffect,
 } from "react";
-import {
-  ChevronRight,
-  ChevronDown,
-  Search,
-  Loader2,
-  ImageOff,
-} from "lucide-react";
-import { motion, AnimatePresence } from "motion/react";
+import { Search, Loader2 } from "lucide-react";
 import { Toaster, toast } from "sonner";
 
 import {
@@ -121,15 +116,48 @@ function buildLayout(
   return out;
 }
 
+// ─── Transform helpers (pan + zoom) ──────────────────────────────────────────
+
+interface Transform {
+  x: number;
+  y: number;
+  k: number; // zoom scale
+}
+
+function screenToCanvas(tx: Transform, sx: number, sy: number): { x: number; y: number } {
+  return {
+    x: (sx - tx.x) / tx.k,
+    y: (sy - tx.y) / tx.k,
+  };
+}
+
+function canvasToScreen(tx: Transform, cx: number, cy: number): { x: number; y: number } {
+  return {
+    x: cx * tx.k + tx.x,
+    y: cy * tx.k + tx.y,
+  };
+}
+
 // ─── Visual tokens ─────────────────────────────────────────────────────────────
 
-const TYPE_CONFIG: Record<NodeType, { dot: string; badge: string; text: string; label: string }> = {
-  root:      { dot: "#22d3ee", badge: "rgba(34,211,238,0.12)",  text: "#22d3ee", label: "root"        },
-  module:    { dot: "#34d399", badge: "rgba(52,211,153,0.12)",  text: "#34d399", label: "Crafting"     },
-  component: { dot: "#fb923c", badge: "rgba(251,146,60,0.12)",  text: "#fb923c", label: "MAX STEP"     },
-  resource:  { dot: "#94a3b8", badge: "rgba(148,163,184,0.09)", text: "#94a3b8", label: "Raw Resource" },
-  emc:       { dot: "#a855f7", badge: "rgba(168,85,247,0.12)",  text: "#a855f7", label: "EMC"          }
+const TYPE_CONFIG: Record<NodeType, { dot: string; badge: string; text: string; label: string; bg: string }> = {
+  root:      { dot: "#22d3ee", badge: "rgba(34,211,238,0.12)",  text: "#22d3ee", label: "root",        bg: "rgba(34,211,238,0.06)" },
+  module:    { dot: "#34d399", badge: "rgba(52,211,153,0.12)",  text: "#34d399", label: "Crafting",     bg: "rgba(52,211,153,0.06)" },
+  component: { dot: "#fb923c", badge: "rgba(251,146,60,0.12)",  text: "#fb923c", label: "MAX STEP",     bg: "rgba(251,146,60,0.06)" },
+  resource:  { dot: "#94a3b8", badge: "rgba(148,163,184,0.09)", text: "#94a3b8", label: "Raw Resource", bg: "rgba(148,163,184,0.04)" },
+  emc:       { dot: "#a855f7", badge: "rgba(168,85,247,0.12)",  text: "#a855f7", label: "EMC",          bg: "rgba(168,85,247,0.06)" },
 };
+
+// Canvas color tokens (dark theme)
+const CANVAS_BG = "#0d0d14";
+const CANVAS_GRID = "rgba(255,255,255,0.035)";
+const CANVAS_EDGE = "rgba(255,255,255,0.085)";
+const CANDS_EDGE_HL = "rgba(34,211,238,0.55)";
+const CANVAS_EDGE_SEL = "#22d3ee";
+const NODE_BORDER = "rgba(255,255,255,0.07)";
+const NODE_BORDER_SEL = "rgba(34,211,238,0.42)";
+const NODE_BORDER_HL = "#22d3ee";
+const NODE_RADIUS = 10;
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -164,7 +192,7 @@ function countAll(node: TreeNode): number {
 
 // ─── Convert raw TreeNode → display TreeNode ──────────────────────────────────
 
-const MAX_STEPS = 5; 
+const MAX_STEPS = 5;
 function rawToDisplay(node: RawTreeNode, isRoot = false): TreeNode {
   const itemId = node.item ?? "unknown";
   const source = node.source;
@@ -253,240 +281,164 @@ function getAlternatives(itemId: string, recipes: RecipeMap): AltOption[] {
     }));
 }
 
-// ─── NodeCard (memoised) ──────────────────────────────────────────────────────
-// Extracted so React.memo can skip re-renders for off-screen or unchanged nodes.
+// ─── Canvas renderer ──────────────────────────────────────────────────────────
 
-interface NodeCardProps {
-  node: LayoutNode;
-  isTreeEx: boolean;
-  isCardEx: boolean;
-  isSel: boolean;
-  isHighlighted: boolean;
-  isAltOpen: boolean;
-  altLoading: boolean;
-  useAnimations: boolean;
-  onSelect: () => void;
-  onToggleTree: (e: React.MouseEvent) => void;
-  onToggleCard: (e: React.MouseEvent) => void;
-  onAltClick: (e: React.MouseEvent) => void;
+interface CanvasRenderer {
+  canvas: HTMLCanvasElement;
+  ctx: CanvasRenderingContext2D;
+  width: number;
+  height: number;
+  dpr: number;
 }
 
-const NodeCard = memo(
-  ({
-    node,
-    isTreeEx,
-    isCardEx,
-    isSel,
-    isHighlighted,
-    isAltOpen,
-    altLoading,
-    useAnimations,
-    onSelect,
-    onToggleTree,
-    onToggleCard,
-    onAltClick,
-  }: NodeCardProps) => {
-    const cfg = TYPE_CONFIG[node.type];
-    const hasKids = !!node.children?.length;
+function initCanvas(canvas: HTMLCanvasElement): CanvasRenderer {
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  const ctx = canvas.getContext("2d")!;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { canvas, ctx, width: rect.width, height: rect.height, dpr };
+}
 
-    const inner = (
-      <div
-        className="w-full h-full flex flex-col rounded-lg overflow-hidden transition-shadow duration-150"
-        style={{
-          background: isSel
-            ? "rgba(34,211,238,0.045)"
-            : isHighlighted
-            ? "rgba(34,211,238,0.08)"
-            : "var(--card)",
-          border: `1px solid ${
-            isSel
-              ? "rgba(34,211,238,0.42)"
-              : isHighlighted
-              ? "#22d3ee"
-              : "rgba(255,255,255,0.07)"
-          }`,
-          boxShadow: isSel
-            ? "inset 3px 0 0 rgba(34,211,238,0.65), 0 4px 24px rgba(0,0,0,0.45)"
-            : isHighlighted
-            ? "0 0 20px rgba(34,211,238,0.35), 0 0 40px rgba(34,211,238,0.12), 0 2px 12px rgba(0,0,0,0.3)"
-            : "0 2px 12px rgba(0,0,0,0.3)",
-          cursor: "pointer",
-        }}
-      >
-        {/* Content row */}
-        <div className="flex-1 flex flex-col justify-center px-3.5 pt-2.5 pb-2 min-h-0">
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2 min-w-0">
-              <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: cfg.dot }} />
-              <span className="text-[13px] font-medium text-foreground truncate leading-tight">
-                {node.label}
-              </span>
-            </div>
-            {hasKids && (
-              <button
-                data-node
-                className="shrink-0 w-[22px] h-[22px] flex items-center justify-center rounded hover:bg-white/5 transition-colors"
-                style={{ color: isTreeEx ? cfg.dot : "rgba(255,255,255,0.28)" }}
-                onClick={onToggleTree}
-                aria-label={isTreeEx ? "Collapse children" : "Expand children"}
-              >
-                <ChevronRight
-                  size={11}
-                  style={{
-                    transform: isTreeEx ? "rotate(90deg)" : "rotate(0deg)",
-                    transition: "transform 0.2s ease",
-                  }}
-                />
-              </button>
-            )}
-          </div>
-          <div className="flex items-center gap-2 mt-2">
-            {node.meta && (
-              <span
-                className="text-[10px] px-1.5 py-px rounded leading-none"
-                style={{ background: cfg.badge, color: cfg.text, fontFamily: "'JetBrains Mono', monospace" }}
-              >
-                {node.meta}
-              </span>
-            )}
-            {node.type !== "resource" && (
-              <button
-                data-node
-                className="shrink-0 flex items-center justify-center w-[22px] h-[22px] rounded hover:bg-white/5 transition-colors text-muted-foreground hover:text-foreground"
-                style={isAltOpen ? { color: "#22d3ee" } : {}}
-                onClick={onAltClick}
-                aria-label="Show alternative recipes"
-                title="Alternatives"
-              >
-                {altLoading ? (
-                  <Loader2 size={10} className="animate-spin" />
-                ) : (
-                  <span style={{ fontSize: 11 }}>⇄</span>
-                )}
-              </button>
-            )}
-            {hasKids && (
-              <span
-                className="text-[10px] text-muted-foreground leading-none"
-                style={{ fontFamily: "'JetBrains Mono', monospace" }}
-              >
-                {node.children!.length}&thinsp;children
-              </span>
-            )}
-          </div>
-        </div>
+function drawGrid(ctx: CanvasRenderingContext2D, w: number, h: number, tx: Transform) {
+  const gridSize = 28 * tx.k;
+  const offsetX = tx.x % gridSize;
+  const offsetY = tx.y % gridSize;
 
-        {/* Image panel */}
-        <AnimatePresence>
-          {isCardEx && (
-            <motion.div
-              key="img"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.15 }}
-              className="border-t border-border overflow-hidden"
-              style={{ height: NODE_H_IMAGE }}
-            >
-              {node.imageUrl ? (
-                <img
-                  src={node.imageUrl}
-                  alt={node.label}
-                  className="w-full h-full object-contain"
-                  draggable={false}
-                />
-              ) : (
-                <div
-                  className="w-full h-full flex flex-col items-center justify-center gap-2"
-                  style={{ background: "rgba(255,255,255,0.02)" }}
-                >
-                  <ImageOff size={18} className="text-muted-foreground opacity-40" />
-                  <span
-                    className="text-[10px] text-muted-foreground opacity-50"
-                    style={{ fontFamily: "'JetBrains Mono', monospace" }}
-                  >
-                    no image
-                  </span>
-                </div>
-              )}
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {/* Expand strip */}
-        <button
-          data-node
-          className="shrink-0 flex items-center justify-center border-t border-border transition-colors duration-150 hover:bg-white/[0.03]"
-          style={{ height: 22 }}
-          onClick={onToggleCard}
-          aria-label={isCardEx ? "Hide image" : "Show image"}
-        >
-          <ChevronDown
-            size={10}
-            className="text-muted-foreground"
-            style={{
-              transform: isCardEx ? "rotate(180deg)" : "rotate(0deg)",
-              transition: "transform 0.22s ease",
-            }}
-          />
-        </button>
-      </div>
-    );
-
-    // Shared positional style
-    const posStyle: React.CSSProperties = {
-      position: "absolute",
-      left: 0,
-      top: 0,
-      width: NODE_W,
-    };
-
-    if (useAnimations) {
-      return (
-        <motion.div
-          key={node.id}
-          initial={{ opacity: 0, scale: 0.88, x: node.x, y: node.y, height: node.height }}
-          animate={{ opacity: 1, scale: 1,   x: node.x, y: node.y, height: node.height }}
-          exit={{ opacity: 0, scale: 0.88 }}
-          transition={{ duration: 0.22, ease: [0.25, 0.46, 0.45, 0.94] }}
-          style={posStyle}
-          data-node
-          onClick={onSelect}
-        >
-          {inner}
-        </motion.div>
-      );
+  ctx.fillStyle = CANVAS_GRID;
+  for (let x = offsetX; x < w; x += gridSize) {
+    for (let y = offsetY; y < h; y += gridSize) {
+      ctx.beginPath();
+      ctx.arc(x, y, 1, 0, Math.PI * 2);
+      ctx.fill();
     }
+  }
+}
 
-    return (
-      <div
-        key={node.id}
-        style={{ ...posStyle, transform: `translate(${node.x}px, ${node.y}px)`, height: node.height }}
-        data-node
-        onClick={onSelect}
-      >
-        {inner}
-      </div>
-    );
-  },
-  // Custom equality — only re-render when something the card actually shows has changed
-  (prev, next) =>
-    prev.node.id         === next.node.id &&
-    prev.node.x          === next.node.x &&
-    prev.node.y          === next.node.y &&
-    prev.node.height     === next.node.height &&
-    prev.isTreeEx        === next.isTreeEx &&
-    prev.isCardEx        === next.isCardEx &&
-    prev.isSel           === next.isSel &&
-    prev.isHighlighted   === next.isHighlighted &&
-    prev.isAltOpen       === next.isAltOpen &&
-    prev.altLoading      === next.altLoading &&
-    prev.useAnimations   === next.useAnimations
-);
+function drawEdge(
+  ctx: CanvasRenderingContext2D,
+  x1: number, y1: number,
+  x2: number, y2: number,
+  isHl: boolean,
+  isSel: boolean
+) {
+  const mx = (x1 + x2) / 2;
+  ctx.beginPath();
+  ctx.moveTo(x1, y1);
+  ctx.bezierCurveTo(mx, y1, mx, y2, x2, y2);
+
+  if (isSel) {
+    ctx.strokeStyle = CANVAS_EDGE_SEL;
+    ctx.lineWidth = 2;
+  } else if (isHl) {
+    ctx.strokeStyle = CANDS_EDGE_HL;
+    ctx.lineWidth = 1.5;
+  } else {
+    ctx.strokeStyle = CANVAS_EDGE;
+    ctx.lineWidth = 1;
+  }
+  ctx.stroke();
+}
+
+function drawNode(
+  ctx: CanvasRenderingContext2D,
+  node: LayoutNode,
+  isSelected: boolean,
+  isHovered: boolean,
+  isTreeEx: boolean,
+  borderColor: string,
+  bgColor: string,
+  dotColor: string
+) {
+  const r = NODE_RADIUS;
+  const x = node.x;
+  const y = node.y;
+  const w = NODE_W;
+  const h = node.height;
+
+  // Background
+  ctx.fillStyle = bgColor;
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+  ctx.fill();
+
+  // Border
+  ctx.strokeStyle = borderColor;
+  ctx.lineWidth = isSelected || isHovered ? 1.5 : 1;
+  ctx.stroke();
+
+  // Type dot
+  ctx.fillStyle = dotColor;
+  ctx.beginPath();
+  ctx.arc(x + 14, y + 18, 3, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Label (truncated)
+  ctx.fillStyle = isSelected || isHovered ? "#ffffff" : "rgba(255,255,255,0.85)";
+  ctx.font = `${isSelected || isHovered ? "500" : "400"} 13px Inter, sans-serif`;
+  const label = node.label;
+  const maxW = w - 60;
+  let displayLabel = label;
+  if (ctx.measureText(label).width > maxW) {
+    while (ctx.measureText(displayLabel + "…").width > maxW && displayLabel.length > 0) {
+      displayLabel = displayLabel.slice(0, -1);
+    }
+    displayLabel += "…";
+  }
+  ctx.fillText(displayLabel, x + 20, y + 26);
+
+  // Meta badge
+  if (node.meta) {
+    const badgeText = node.meta;
+    const badgeW = ctx.measureText(badgeText).width + 10;
+    const badgeH = 16;
+    const badgeX = x + 16;
+    const badgeY = y + 38;
+
+    ctx.fillStyle = TYPE_CONFIG[node.type]?.badge || "rgba(255,255,255,0.1)";
+    ctx.beginPath();
+    ctx.roundRect(badgeX, badgeY, badgeW, badgeH, 3);
+    ctx.fill();
+
+    ctx.fillStyle = TYPE_CONFIG[node.type]?.text || "#ffffff";
+    ctx.font = `500 10px "JetBrains Mono", monospace`;
+    ctx.fillText(badgeText, badgeX + 5, badgeY + 12);
+  }
+
+  // Children count
+  if (node.children?.length) {
+    ctx.fillStyle = "rgba(255,255,255,0.35)";
+    ctx.font = `400 10px "JetBrains Mono", monospace`;
+    ctx.fillText(`${node.children.length} children`, x + 16, y + 60);
+  }
+
+  // Expand/collapse indicator
+  if (node.children?.length) {
+    const cx = x + w - 28;
+    const cy = y + 18;
+    ctx.fillStyle = isTreeEx ? dotColor : "rgba(255,255,255,0.28)";
+    ctx.font = `bold 11px sans-serif`;
+    ctx.fillText(isTreeEx ? "▸" : "▹", cx, cy + 4);
+  }
+
+  // Collapse indicator at bottom
+  ctx.fillStyle = "rgba(255,255,255,0.2)";
+  ctx.font = `400 10px sans-serif`;
+  ctx.fillText("∨", x + w - 18, y + h - 6);
+}
 
 // ─── Main component ───────────────────────────────────────────────────────────
 
-const INIT_EXPANDED = new Set<string>(["root", "frontend", "gateway", "services", "data"]);
 const VIEWPORT_PAD = 120;
 
 export default function App() {
@@ -504,11 +456,10 @@ export default function App() {
   const [items, setItems] = useState<ItemsData>({});
   const [loadedRecipes, setLoadedRecipes] = useState<RecipeMap>({});
 
-  const [treeExpanded, setTreeExpanded] = useState<Set<string>>(INIT_EXPANDED);
+  const [treeExpanded, setTreeExpanded] = useState<Set<string>>(new Set());
   const [cardExpanded, setCardExpanded] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<string | null>(null);
 
-  // Sidebar raw material → leaf node cycling
   const [leafGroups, setLeafGroups] = useState<Record<string, LeafGroup>>({});
 
   // Highlight search
@@ -516,24 +467,68 @@ export default function App() {
   const [highlightedIds, setHighlightedIds] = useState<Set<string>>(new Set());
   const [highlightMatchList, setHighlightMatchList] = useState<LayoutNode[]>([]);
   const [highlightIdx, setHighlightIdx] = useState(-1);
-  const [pan, setPan] = useState({ x: 48, y: 56 });
+
+  // Pan + zoom transform
+  const [transform, setTransform] = useState<Transform>({ x: 48, y: 56, k: 1 });
+
   const [searchQuery, setSearchQuery] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const [viewportSize, setViewportSize] = useState({ w: window.innerWidth, h: window.innerHeight });
 
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const isPanning = useRef(false);
   const dragOrigin = useRef({ mx: 0, my: 0, px: 0, py: 0 });
-  // for panel throttling
   const rafId = useRef<number | null>(null);
-  const pendingPan = useRef({ x: 48, y: 56 });
+  const pendingTransform = useRef<Transform>({ x: 48, y: 56, k: 1 });
   const [panActive, setPanActive] = useState(false);
+
+  // Hover state
+  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
 
   // Track viewport size for culling
   useEffect(() => {
-    const onResize = () => setViewportSize({ w: window.innerWidth, h: window.innerHeight });
+    const onResize = () => {
+      if (canvasRef.current) {
+        const dpr = window.devicePixelRatio || 1;
+        const rect = canvasRef.current.getBoundingClientRect();
+        canvasRef.current.width = rect.width * dpr;
+        canvasRef.current.height = rect.height * dpr;
+        const ctx = canvasRef.current.getContext("2d")!;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      }
+    };
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
+
+  // Wheel zoom listener (non-passive to allow preventDefault)
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const handler = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+
+      const zoomLevels = [0.25, 0.5, 1.0];
+      const currentIdx = zoomLevels.indexOf(Math.round(pendingTransform.current.k * 100) / 100);
+      const dir = e.deltaY > 0 ? -1 : 1;
+      const newIdx = Math.max(0, Math.min(zoomLevels.length - 1, currentIdx + dir));
+      const newK = zoomLevels[newIdx];
+
+      // Zoom toward cursor
+      const ratio = newK / pendingTransform.current.k;
+      const newPx = mx - (mx - pendingTransform.current.x) * ratio;
+      const newPy = my - (my - pendingTransform.current.y) * ratio;
+
+      pendingTransform.current = { x: newPx, y: newPy, k: newK };
+      setTransform({ ...pendingTransform.current });
+    };
+    canvas.addEventListener("wheel", handler, { passive: false });
+    return () => canvas.removeEventListener("wheel", handler);
+  }, [treeRoot]);
 
   // Load manifest + default item on mount
   useEffect(() => {
@@ -546,7 +541,7 @@ export default function App() {
         const { displayTree, rawTree, recipes } = await loadTree(defaultItem);
         const unique = assignUniqueIds(displayTree);
         setTreeRoot(unique);
-        setTreeExpanded(new Set([unique.id]));
+        setTreeExpanded(collectAllIds(unique));
         setLoadedRecipes(recipes);
         setItems(sumLeafIngredients(rawTree));
       } catch (err) {
@@ -563,25 +558,25 @@ export default function App() {
   );
   const byId = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
 
-  // ── Performance flags ──────────────────────────────────────────────────────
-  const useAnimations = nodes.length < 200;
-
   // ── Viewport culling ───────────────────────────────────────────────────────
-  // Only render nodes whose bounding box overlaps the visible viewport.
   const visibleNodes = useMemo(() => {
-    const { w, h } = viewportSize;
+    const w = containerRef.current?.clientWidth || window.innerWidth;
+    const h = containerRef.current?.clientHeight || window.innerHeight;
     return nodes.filter(
-      (n) =>
-        n.x + pan.x < w + VIEWPORT_PAD &&
-        n.x + pan.x + NODE_W > -VIEWPORT_PAD &&
-        n.y + pan.y < h + VIEWPORT_PAD &&
-        n.y + pan.y + n.height > -VIEWPORT_PAD
+      (n) => {
+        const s = canvasToScreen(transform, n.x, n.y);
+        return (
+          s.x < w + VIEWPORT_PAD &&
+          s.x + NODE_W * transform.k > -VIEWPORT_PAD &&
+          s.y < h + VIEWPORT_PAD &&
+          s.y + n.height * transform.k > -VIEWPORT_PAD
+        );
+      }
     );
-  }, [nodes, pan, viewportSize]);
+  }, [nodes, transform]);
 
   const visibleIds = useMemo(() => new Set(visibleNodes.map((n) => n.id)), [visibleNodes]);
 
-  // ── Count leaves per item from the full tree (even when collapsed) ──────
   const leafCountPerItem = useMemo(() => {
     if (!treeRoot) return new Map<string, number>();
     const counts = new Map<string, number>();
@@ -597,7 +592,6 @@ export default function App() {
     return counts;
   }, [treeRoot]);
 
-  // ── Leaf groups for cycling (from expanded nodes only) ──────────────────
   const leafGroupsComputed = useMemo(() => {
     const groups = new Map<string, LayoutNode[]>();
     for (const n of nodes) {
@@ -615,7 +609,6 @@ export default function App() {
     return result;
   }, [nodes]);
 
-  // Merge with user state (selectedIndex)
   const leafGroupsMerged = useMemo(() => {
     const merged = { ...leafGroups };
     for (const [itemId, group] of Object.entries(leafGroupsComputed)) {
@@ -628,7 +621,6 @@ export default function App() {
     return merged;
   }, [leafGroupsComputed, leafGroups]);
 
-  // ── Which raw materials are EMC-type? (from full tree, not just expanded) ─
   const emcItems = useMemo(() => {
     const set = new Set<string>();
     if (!treeRoot) return set;
@@ -647,10 +639,9 @@ export default function App() {
     for (const n of nodes) {
       if (n.children && treeExpanded.has(n.id)) {
         for (const c of n.children) {
-          // Only draw edge if at least one endpoint is visible
           if (byId.has(c.id) && (visibleIds.has(n.id) || visibleIds.has(c.id))) {
-            const isHighlighted = highlightedIds.has(n.id) || highlightedIds.has(c.id);
-            result.push({ fid: n.id, tid: c.id, isHighlighted });
+            const isHl = highlightedIds.has(n.id) || highlightedIds.has(c.id);
+            result.push({ fid: n.id, tid: c.id, isHighlighted: isHl });
           }
         }
       }
@@ -658,27 +649,88 @@ export default function App() {
     return result;
   }, [nodes, byId, treeExpanded, visibleIds, highlightedIds]);
 
-  const canvasW = nodes.reduce((m, n) => Math.max(m, n.x + NODE_W + 120), 600);
-  const canvasH = nodes.reduce((m, n) => Math.max(m, n.y + n.height + 120), 400);
   const totalNodes = useMemo(() => (treeRoot ? countAll(treeRoot) : 0), [treeRoot]);
 
-  // ── Callbacks ──────────────────────────────────────────────────────────────
+  // ── Canvas draw loop ───────────────────────────────────────────────────────
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
 
-  const toggleTree = useCallback((id: string) => {
-    setTreeExpanded((p) => {
-      const s = new Set(p);
-      s.has(id) ? s.delete(id) : s.add(id);
-      return s;
-    });
-  }, []);
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
 
-  const toggleCard = useCallback((id: string) => {
-    setCardExpanded((p) => {
-      const s = new Set(p);
-      s.has(id) ? s.delete(id) : s.add(id);
-      return s;
-    });
-  }, []);
+    const ctx = canvas.getContext("2d")!;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const w = canvas.clientWidth;
+    const h = canvas.clientHeight;
+
+    // Clear
+    ctx.clearRect(0, 0, w, h);
+
+    // Background
+    ctx.fillStyle = CANVAS_BG;
+    ctx.fillRect(0, 0, w, h);
+
+    // Grid
+    drawGrid(ctx, w, h, transform);
+
+    // Edges
+    for (const { fid, tid, isHighlighted } of edges) {
+      const f = byId.get(fid);
+      const t = byId.get(tid);
+      if (!f || !t) continue;
+      const x1 = f.x + NODE_W;
+      const y1 = f.y + f.height / 2;
+      const x2 = t.x;
+      const y2 = t.y + t.height / 2;
+      const s1 = canvasToScreen(transform, x1, y1);
+      const s2 = canvasToScreen(transform, x2, y2);
+      const isSel = selected === fid || selected === tid;
+      drawEdge(ctx, s1.x, s1.y, s2.x, s2.y, isHighlighted, isSel);
+    }
+
+    // Visible nodes
+    for (const node of visibleNodes) {
+      const s = canvasToScreen(transform, node.x, node.y);
+      const sw = NODE_W * transform.k;
+      const sh = node.height * transform.k;
+      const isSelected = selected === node.id;
+      const isHovered = hoveredNodeId === node.id;
+      const isTreeEx = treeExpanded.has(node.id);
+      const cfg = TYPE_CONFIG[node.type];
+      let borderColor: string;
+      let bgColor: string;
+      if (isSelected) {
+        borderColor = NODE_BORDER_SEL;
+        bgColor = "rgba(34,211,238,0.045)";
+      } else if (isHovered) {
+        borderColor = NODE_BORDER_HL;
+        bgColor = "rgba(34,211,238,0.08)";
+      } else {
+        borderColor = NODE_BORDER;
+        bgColor = "var(--card)";
+      }
+
+      ctx.save();
+      ctx.translate(s.x, s.y);
+      ctx.scale(transform.k, transform.k);
+
+      drawNode(
+        ctx,
+        { ...node, x: 0, y: 0, height: node.height },
+        isSelected,
+        isHovered,
+        isTreeEx,
+        borderColor,
+        bgColor,
+        cfg.dot
+      );
+
+      ctx.restore();
+    }
+  }, [nodes, edges, visibleNodes, transform, selected, hoveredNodeId, treeExpanded, highlightedIds, byId]);
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -689,10 +741,10 @@ export default function App() {
       const { displayTree, rawTree, recipes } = await loadTree(q, {});
       const unique = assignUniqueIds(displayTree);
       setTreeRoot(unique);
-      setTreeExpanded(new Set([unique.id]));
+      setTreeExpanded(collectAllIds(unique));
       setCardExpanded(new Set());
       setSelected(null);
-      setPan({ x: 48, y: 56 });
+      setTransform({ x: 48, y: 56, k: 1 });
       setLoadedRecipes(recipes);
       setItems(sumLeafIngredients(rawTree));
       setOverrides({});
@@ -704,7 +756,7 @@ export default function App() {
     }
   };
 
-  // ── Pan — throttled to one setState per animation frame ───────────────────
+  // ── Pan ────────────────────────────────────────────────────────────────────
 
   const onMouseDown = useCallback(
     (e: React.MouseEvent) => {
@@ -712,20 +764,21 @@ export default function App() {
       setAltPanel(null);
       isPanning.current = true;
       setPanActive(true);
-      dragOrigin.current = { mx: e.clientX, my: e.clientY, px: pan.x, py: pan.y };
+      dragOrigin.current = { mx: e.clientX, my: e.clientY, px: transform.x, py: transform.y };
     },
-    [pan]
+    [transform]
   );
 
   const onMouseMove = useCallback((e: React.MouseEvent) => {
     if (!isPanning.current) return;
-    pendingPan.current = {
+    pendingTransform.current = {
       x: dragOrigin.current.px + e.clientX - dragOrigin.current.mx,
       y: dragOrigin.current.py + e.clientY - dragOrigin.current.my,
+      k: pendingTransform.current.k,
     };
     if (rafId.current === null) {
       rafId.current = requestAnimationFrame(() => {
-        setPan({ ...pendingPan.current });
+        setTransform({ ...pendingTransform.current });
         rafId.current = null;
       });
     }
@@ -737,36 +790,9 @@ export default function App() {
     if (rafId.current !== null) {
       cancelAnimationFrame(rafId.current);
       rafId.current = null;
-      // Flush any pending pan so final position is accurate
-      setPan({ ...pendingPan.current });
+      setTransform({ ...pendingTransform.current });
     }
   }, []);
-
-  // ── Alt panel ──────────────────────────────────────────────────────────────
-
-  const handleAltClick = useCallback(
-    async (e: React.MouseEvent, node: LayoutNode) => {
-      e.stopPropagation();
-      if (altPanel?.nodeId === node.id) {
-        setAltPanel(null);
-        return;
-      }
-      setAltLoading(true);
-      setAltPanel(null);
-      try {
-        const realId = node.itemId ?? node.id;
-        await getRecipes(realId);
-        const recipes = getLoadedRecipes();
-        const options = getAlternatives(realId, recipes);
-        setAltPanel({ nodeId: node.id, realItemId: realId, x: node.x + NODE_W + 8, y: node.y, options });
-      } catch {
-        toast.error("Failed to load alternatives");
-      } finally {
-        setAltLoading(false);
-      }
-    },
-    [altPanel]
-  );
 
   function collectDescendantItemIds(
     node: TreeNode,
@@ -783,19 +809,18 @@ export default function App() {
   // ── Sidebar raw material click → cycle through leaf nodes ────────────────
   const handleLeafClick = useCallback(
     (itemId: string) => {
-      // If no leaves exist for this item in the full tree, nothing to do
       if (!treeRoot || (leafCountPerItem.get(itemId) ?? 0) === 0) return;
 
       const group = leafGroupsMerged[itemId];
       const hasVisibleLeaves = group && group.leaves.length > 0;
 
-      // If leaves aren't visible (tree collapsed), expand the path to the first leaf
       if (!hasVisibleLeaves) {
         const firstLeaf = findFirstLeaf(treeRoot, itemId);
         if (firstLeaf) {
           const ancestors = new Set<string>();
+          const targetId = firstLeaf.id;
           function walk(n: TreeNode) {
-            if (n.id === firstLeaf.id) { ancestors.add(n.id); return true; }
+            if (n.id === targetId) { ancestors.add(n.id); return true; }
             if (n.children) {
               for (const c of n.children) {
                 if (walk(c)) { ancestors.add(n.id); return true; }
@@ -810,7 +835,7 @@ export default function App() {
             return next;
           });
         }
-        return; // Will re-enter after tree expands
+        return;
       }
 
       const nextIndex = (group.selectedIndex + 1) % group.leaves.length;
@@ -820,8 +845,6 @@ export default function App() {
       }));
 
       const targetNode = group.leaves[nextIndex];
-
-      // Expand all ancestor nodes on the path to the target leaf
       const ancestors = new Set<string>();
       function walk(n: TreeNode) {
         if (n.id === targetNode.id) { ancestors.add(n.id); return true; }
@@ -839,18 +862,16 @@ export default function App() {
         return next;
       });
 
-      // Center the node in the viewport: screenPos = nodePos + pan
-      // We want screenPos = viewportSize / 2, so pan = viewportSize/2 - nodePos
-      setPan({
-        x: viewportSize.w / 2 - targetNode.x,
-        y: viewportSize.h / 2 - targetNode.y,
+      setTransform({
+        x: (containerRef.current?.clientWidth || window.innerWidth) / 2 - targetNode.x,
+        y: (containerRef.current?.clientHeight || window.innerHeight) / 2 - targetNode.y,
+        k: transform.k,
       });
       setSelected(targetNode.id);
     },
-    [leafGroupsMerged, viewportSize, treeRoot, leafCountPerItem]
+    [leafGroupsMerged, treeRoot, leafCountPerItem, transform]
   );
 
-  // ── Find first leaf with matching itemId in a tree ──────────────────────
   function findFirstLeaf(node: TreeNode, targetItemId: string): TreeNode | null {
     if ((node.itemId ?? node.id) === targetItemId && !node.children?.length) {
       return node;
@@ -916,7 +937,7 @@ export default function App() {
     [overrides, searchQuery, altPanel, treeExpanded, cardExpanded, byId]
   );
 
-  // ── Highlight search (applied on Enter, cycles on subsequent Enter) ────
+  // ── Highlight search ───────────────────────────────────────────────────────
   const handleHighlightKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
       if (e.key !== "Enter") return;
@@ -931,19 +952,18 @@ export default function App() {
         return;
       }
 
-      // If we already have a match list, cycle to next match
       if (highlightMatchList.length > 0) {
         const nextIdx = (highlightIdx + 1) % highlightMatchList.length;
         setHighlightIdx(nextIdx);
         const target = highlightMatchList[nextIdx];
-        setPan({
-          x: viewportSize.w / 2 - target.x,
-          y: viewportSize.h / 2 - target.y,
+        setTransform({
+          x: (containerRef.current?.clientWidth || window.innerWidth) / 2 - target.x,
+          y: (containerRef.current?.clientHeight || window.innerHeight) / 2 - target.y,
+          k: transform.k,
         });
         return;
       }
 
-      // Compute new matches
       const matches: LayoutNode[] = [];
       for (const n of nodes) {
         if (
@@ -958,13 +978,14 @@ export default function App() {
       setHighlightIdx(0);
 
       if (matches.length > 0) {
-        setPan({
-          x: viewportSize.w / 2 - matches[0].x,
-          y: viewportSize.h / 2 - matches[0].y,
+        setTransform({
+          x: (containerRef.current?.clientWidth || window.innerWidth) / 2 - matches[0].x,
+          y: (containerRef.current?.clientHeight || window.innerHeight) / 2 - matches[0].y,
+          k: transform.k,
         });
       }
     },
-    [nodes, highlightMatchList, highlightIdx, viewportSize]
+    [nodes, highlightMatchList, highlightIdx, transform]
   );
 
   const handleHighlightClear = useCallback(() => {
@@ -974,12 +995,11 @@ export default function App() {
     setHighlightIdx(-1);
   }, []);
 
-  const clearHighlightSearch = useCallback(() => {
-    setHighlightSearch("");
-    setHighlightedIds(new Set());
-  }, []);
-
   // ── Render ─────────────────────────────────────────────────────────────────
+
+  // Find hovered node data for HTML overlay
+  const hoveredNode = hoveredNodeId ? byId.get(hoveredNodeId) : null;
+  const selectedNode = selected ? byId.get(selected) : null;
 
   return (
     <>
@@ -997,7 +1017,7 @@ export default function App() {
       />
 
       <div className="size-full flex bg-background text-foreground overflow-hidden" style={{ fontFamily: "'Inter', sans-serif" }}>
-        <div className="flex-1 flex flex-col min-w-0">
+        <div className="flex-1 flex flex-col min-w-0" ref={containerRef}>
 
           {/* ── Toolbar ── */}
           <header className="shrink-0 flex items-center gap-3 border-b border-border px-4 h-12">
@@ -1034,12 +1054,20 @@ export default function App() {
               <span className="text-xs text-muted-foreground tabular-nums mr-1" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
                 {visibleNodes.length} visible / {nodes.length} expanded / {totalNodes} total
               </span>
+              <span className="text-xs text-muted-foreground tabular-nums mr-1" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
+                {Math.round(transform.k * 100)}%
+              </span>
+              <button
+                onClick={() => setTransform({ x: 48, y: 56, k: 1 })}
+                className="text-xs px-2.5 py-1 rounded border border-border text-muted-foreground hover:text-foreground hover:border-white/20 transition-colors"
+              >
+                Reset view
+              </button>
               {(
                 [
                   { label: "Hide images", fn: () => setCardExpanded(new Set()) },
                   { label: "Expand all",  fn: () => treeRoot && setTreeExpanded(collectAllIds(treeRoot)) },
                   { label: "Collapse all",fn: () => treeRoot && setTreeExpanded(new Set([treeRoot.id])) },
-                  { label: "Reset view",  fn: () => setPan({ x: 48, y: 56 }) },
                 ] as const
               ).map(({ label, fn }) => (
                 <button key={label} onClick={fn} className="text-xs px-2.5 py-1 rounded border border-border text-muted-foreground hover:text-foreground hover:border-white/20 transition-colors">
@@ -1102,148 +1130,93 @@ export default function App() {
               onMouseUp={onMouseUp}
               onMouseLeave={onMouseUp}
             >
-              {/* Dot grid */}
-              <svg className="absolute inset-0 w-full h-full pointer-events-none" aria-hidden>
-                <defs>
-                  <pattern id="dotgrid" width={28} height={28} x={pan.x % 28} y={pan.y % 28} patternUnits="userSpaceOnUse">
-                    <circle cx={1} cy={1} r={1} fill="rgba(255,255,255,0.045)" />
-                  </pattern>
-                </defs>
-                <rect width="100%" height="100%" fill="url(#dotgrid)" />
-              </svg>
+              <canvas
+                ref={canvasRef}
+                className="absolute inset-0 w-full h-full"
+                style={{ touchAction: "none" }}
+              />
 
-              {/* Pan layer */}
-              <div style={{ position: "absolute", transform: `translate(${pan.x}px, ${pan.y}px)`, width: canvasW, height: canvasH }}>
-                {/* SVG edges */}
-                <svg style={{ position: "absolute", inset: 0, width: canvasW, height: canvasH, overflow: "visible", pointerEvents: "none" }} aria-hidden>
-                  {edges.map(({ fid, tid, isHighlighted }) => {
-                    const f = byId.get(fid);
-                    const t = byId.get(tid);
-                    if (!f || !t) return null;
-                    const x1 = f.x + NODE_W;
-                    const y1 = f.y + f.height / 2;
-                    const x2 = t.x;
-                    const y2 = t.y + t.height / 2;
-                    const mx = (x1 + x2) / 2;
-                    const isActive = selected === fid || selected === tid;
-                    const strokeColor = isActive
-                      ? "#22d3ee"
-                      : isHighlighted
-                      ? "rgba(34,211,238,0.55)"
-                      : "rgba(255,255,255,0.085)";
-                    const strokeWidth = isActive ? 2 : isHighlighted ? 1.5 : 1;
-                    return (
-                      <path
-                        key={`${fid}-${tid}`}
-                        d={`M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`}
-                        fill="none"
-                        stroke={strokeColor}
-                        strokeWidth={strokeWidth}
-                      />
-                    );
-                  })}
-                </svg>
+              {/* HTML overlay for hovered/selected node with image */}
+              {overlayRef.current && (hoveredNode || selectedNode) && (
+                <div
+                  ref={overlayRef}
+                  className="pointer-events-none absolute"
+                  style={{
+                    left: 0,
+                    top: 0,
+                    width: NODE_W,
+                    zIndex: 10,
+                  }}
+                >
+                  {/* Position will be set via transform below */}
+                </div>
+              )}
 
-                {/* Alt panel */}
-                {altPanel && (
-                  <div
-                    data-node
-                    style={{
-                      position: "absolute", left: altPanel.x, top: altPanel.y,
-                      width: Math.ceil(altPanel.options.length / 8) * 260, zIndex: 50,
-                      background: "#0e0e1a", border: "1px solid rgba(255,255,255,0.10)",
-                      borderRadius: 10, boxShadow: "0 8px 32px rgba(0,0,0,0.55)",
-                      fontFamily: "'JetBrains Mono', monospace", overflow: "hidden",
-                    }}
-                  >
-                    <div className="px-3 py-2 border-b border-border text-[11px] text-muted-foreground">
-                      {altPanel.options.length} alternative{altPanel.options.length !== 1 ? "s" : ""}
-                    </div>
-                    {altPanel.options.length === 0 ? (
-                      <div className="px-3 py-4 text-[11px] text-muted-foreground text-center">No alternatives available</div>
-                    ) : (
-                      <div className="flex">
-                        {Array.from({ length: Math.ceil(altPanel.options.length / 8) }, (_, col) =>
-                          altPanel.options.slice(col * 8, col * 8 + 8)
-                        ).map((chunk, col) => (
-                          <div key={col} className="flex flex-col" style={{ width: 260, borderLeft: col > 0 ? "1px solid rgba(255,255,255,0.07)" : undefined }}>
-                            {chunk.map((opt) => {
-                              const isActive = overrides[altPanel.realItemId] === opt.recipe_id;
-                              return (
-                                <button
-                                  key={opt.recipe_id}
-                                  data-node
-                                  onClick={() => handleSelectAlt(altPanel.nodeId, opt.recipe_id)}
-                                  className="flex flex-col gap-1 px-3 py-2.5 text-left border-b border-border last:border-0 hover:bg-white/[0.04] transition-colors"
-                                  style={isActive ? { background: "rgba(34,211,238,0.07)" } : {}}
-                                >
-                                  <div className="flex items-center justify-between gap-2">
-                                    <span className="text-[11px] font-medium text-foreground truncate">{opt.category_name}</span>
-                                    {isActive && <span className="text-[10px] shrink-0" style={{ color: "#22d3ee" }}>active</span>}
-                                  </div>
-                                  <div className="text-[10px] text-muted-foreground truncate">
-                                    {opt.inputs.map((i) => `${i.name} ×${i.qty}`).join(", ")}
-                                  </div>
-                                </button>
-                              );
-                            })}
-                          </div>
-                        ))}
-                      </div>
-                    )}
+              {/* Alt panel */}
+              {altPanel && (
+                <div
+                  data-node
+                  style={{
+                    position: "absolute",
+                    left: altPanel.x * transform.k + transform.x,
+                    top: altPanel.y * transform.k + transform.y,
+                    width: Math.ceil(altPanel.options.length / 8) * 260 * transform.k,
+                    zIndex: 50,
+                    background: "#0e0e1a",
+                    border: "1px solid rgba(255,255,255,0.10)",
+                    borderRadius: 10,
+                    boxShadow: "0 8px 32px rgba(0,0,0,0.55)",
+                    fontFamily: "'JetBrains Mono', monospace",
+                    overflow: "hidden",
+                    transform: `scale(${transform.k})`,
+                    transformOrigin: "0 0",
+                    pointerEvents: "auto",
+                  }}
+                >
+                  <div className="px-3 py-2 border-b border-border text-[11px] text-muted-foreground">
+                    {altPanel.options.length} alternative{altPanel.options.length !== 1 ? "s" : ""}
                   </div>
-                )}
-
-                {/* Nodes */}
-                {useAnimations ? (
-                  <AnimatePresence>
-                    {visibleNodes.map((node) => (
-                      <NodeCard
-                        key={node.id}
-                        node={node}
-                        isTreeEx={treeExpanded.has(node.id)}
-                        isCardEx={cardExpanded.has(node.id)}
-                        isSel={selected === node.id}
-                        isHighlighted={highlightedIds.has(node.id)}
-                        isAltOpen={altPanel?.nodeId === node.id}
-                        altLoading={altLoading && altPanel === null}
-                        useAnimations={useAnimations}
-                        onSelect={() => setSelected(selected === node.id ? null : node.id)}
-                        onToggleTree={(e) => { e.stopPropagation(); toggleTree(node.id); }}
-                        onToggleCard={(e) => { e.stopPropagation(); toggleCard(node.id); }}
-                        onAltClick={(e) => handleAltClick(e, node)}
-                      />
-                    ))}
-                  </AnimatePresence>
-                ) : (
-                  <>
-                    {visibleNodes.map((node) => (
-                      <NodeCard
-                        key={node.id}
-                        node={node}
-                        isTreeEx={treeExpanded.has(node.id)}
-                        isCardEx={cardExpanded.has(node.id)}
-                        isSel={selected === node.id}
-                        isHighlighted={highlightedIds.has(node.id)}
-                        isAltOpen={altPanel?.nodeId === node.id}
-                        altLoading={altLoading && altPanel === null}
-                        useAnimations={useAnimations}
-                        onSelect={() => setSelected(selected === node.id ? null : node.id)}
-                        onToggleTree={(e) => { e.stopPropagation(); toggleTree(node.id); }}
-                        onToggleCard={(e) => { e.stopPropagation(); toggleCard(node.id); }}
-                        onAltClick={(e) => handleAltClick(e, node)}
-                      />
-                    ))}
-                  </>
-                )}
-              </div>
+                  {altPanel.options.length === 0 ? (
+                    <div className="px-3 py-4 text-[11px] text-muted-foreground text-center">No alternatives available</div>
+                  ) : (
+                    <div className="flex">
+                      {Array.from({ length: Math.ceil(altPanel.options.length / 8) }, (_, col) =>
+                        altPanel.options.slice(col * 8, col * 8 + 8)
+                      ).map((chunk, col) => (
+                        <div key={col} className="flex flex-col" style={{ width: 260, borderLeft: col > 0 ? "1px solid rgba(255,255,255,0.07)" : undefined }}>
+                          {chunk.map((opt) => {
+                            const isActive = overrides[altPanel.realItemId] === opt.recipe_id;
+                            return (
+                              <button
+                                key={opt.recipe_id}
+                                data-node
+                                onClick={() => handleSelectAlt(altPanel.nodeId, opt.recipe_id)}
+                                className="flex flex-col gap-1 px-3 py-2.5 text-left border-b border-border last:border-0 hover:bg-white/[0.04] transition-colors"
+                                style={isActive ? { background: "rgba(34,211,238,0.07)" } : {}}
+                              >
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="text-[11px] font-medium text-foreground truncate">{opt.category_name}</span>
+                                  {isActive && <span className="text-[10px] shrink-0" style={{ color: "#22d3ee" }}>active</span>}
+                                </div>
+                                <div className="text-[10px] text-muted-foreground truncate">
+                                  {opt.inputs.map((i) => `${i.name} ×${i.qty}`).join(", ")}
+                                </div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
           {/* ── Status bar ── */}
           <footer className="shrink-0 flex items-center justify-between border-t border-border px-5 h-7 text-[11px] text-muted-foreground" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
             <div className="flex items-center gap-3">
-              <span className="tabular-nums">x:{Math.round(-pan.x)}&nbsp;&nbsp;y:{Math.round(-pan.y)}</span>
+              <span className="tabular-nums">x:{Math.round(-transform.x)}&nbsp;&nbsp;y:{Math.round(-transform.y)}&nbsp;&nbsp;{Math.round(transform.k * 100)}%</span>
               {selected && byId.has(selected) && (
                 <>
                   <span className="opacity-30">·</span>
@@ -1254,7 +1227,7 @@ export default function App() {
                 </>
               )}
             </div>
-            <span>drag to pan&nbsp;&nbsp;·&nbsp;&nbsp;click to select&nbsp;&nbsp;·&nbsp;&nbsp;▸ children&nbsp;&nbsp;·&nbsp;&nbsp;∨ image</span>
+            <span>drag to pan&nbsp;&nbsp;·&nbsp;&nbsp;scroll to zoom&nbsp;&nbsp;·&nbsp;&nbsp;click to select</span>
           </footer>
         </div>
 

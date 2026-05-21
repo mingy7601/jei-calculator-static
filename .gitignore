@@ -42,3 +42,7 @@ pnpm-debug.log*
 .dev.vars*
 !.dev.vars.example
 !.env.example
+
+.gitignore
+*.txt
+*.md

@@ -44,6 +44,13 @@ function outputQty(recipe: Recipe, itemId: string): number {
 
 // ── Cycle detection ───────────────────────────────────────────────────────────
 
+/** Memoized wouldCycle cache: "inputId:targetId" → boolean */
+let cycleCache = new Map<string, boolean>();
+
+function cycleCacheKey(inputId: string, targetId: string): string {
+  return inputId + "\0" + targetId;
+}
+
 /**
  * Returns true if there is NO viable (non-cyclic) recipe for inputId
  * that doesn't eventually require targetId.
@@ -59,8 +66,15 @@ export function wouldCycle(
   if (inputId === targetId) return true;
   if (depth >= maxDepth) return false;
 
+  const cacheKey = cycleCacheKey(inputId, targetId);
+  const cached = cycleCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+
   const options = recipes[inputId];
-  if (!options?.length) return false;
+  if (!options?.length) {
+    cycleCache.set(cacheKey, false);
+    return false;
+  }
 
   const viable = options.filter(
     (r) =>
@@ -69,7 +83,14 @@ export function wouldCycle(
       )
   );
 
-  return viable.length === 0;
+  const result = viable.length === 0;
+  cycleCache.set(cacheKey, result);
+  return result;
+}
+
+/** Clear the cycle detection cache (call between different tree builds) */
+export function clearCycleCache(): void {
+  cycleCache.clear();
 }
 
 // ── Build tree ────────────────────────────────────────────────────────────────
@@ -84,27 +105,40 @@ export function buildTree(
     visited?: ReadonlySet<string>;
     overrides?: Record<string, number>;
     emcValues?: EmcMap;
+    /** Memoization cache to prevent exponential blowup on DAGs */
+    memo?: Map<string, TreeNode>;
   } = {}
 ): TreeNode {
+  // Clear cycle cache for each new tree build
+  clearCycleCache();
+
   const {
     name,
     visited = new Set<string>(),
     overrides = {},
     emcValues = {},
+    memo = new Map<string, TreeNode>(),
   } = opts;
 
-  const resolveName = () => name ?? item;
-
   if (visited.has(item)) {
-    return { item, name: resolveName(), source: "cycle" };
+    return { item, name: name ?? item, source: "cycle" };
   }
   if (step >= maxSteps) {
-    return { item, name: resolveName(), source: "limit" };
+    return { item, name: name ?? item, source: "limit" };
   }
+
+  // ── DAG memoization by (item, step) to prevent exponential blowup ──
+  // For a given item at a given step, the result is deterministic regardless
+  // of visited set (visited only affects cycle detection limited to depth 2).
+  const memoKey = `${item}\0${step}`;
+  const cached = memo.get(memoKey);
+  if (cached) return cached;
 
   const options = recipes[item];
   if (!options?.length) {
-    return { item, name: resolveName(), source: "base" };
+    const result = { item, name: name ?? item, source: "base" };
+    memo.set(memoKey, result);
+    return result;
   }
 
   const childVisited = new Set(visited).add(item);
@@ -115,7 +149,9 @@ export function buildTree(
   );
 
   if (!viable.length) {
-    return { item, name: resolveName(), source: "cycle" };
+    const result = { item, name: name ?? item, source: "cycle" };
+    memo.set(memoKey, result);
+    return result;
   }
 
   // Sort: highest output qty first, then machine priority
@@ -136,9 +172,9 @@ export function buildTree(
 
   const recipe = viable[0];
 
-  return {
+  const result = {
     item,
-    name: resolveName(),
+    name: name ?? item,
     step,
     category: recipe.category,
     category_name: recipe.category_name,
@@ -153,10 +189,15 @@ export function buildTree(
             visited: childVisited,
             overrides,
             emcValues,
+            memo,
           });
       return { ...child, qty: inp.qty ?? 1 };
     }),
   };
+
+  // Cache the final result
+  memo.set(memoKey, result);
+  return result;
 }
 
 // ── Collect all item ids referenced in a tree ─────────────────────────────────
