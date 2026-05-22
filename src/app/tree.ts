@@ -13,7 +13,7 @@ export interface TreeNode {
   item: string;
   name: string;
   qty?: number;
-  source?: "base" | "cycle" | "limit" | "emc" | "unknown";
+  source?: "base" | "cycle" | "limit" | "emc" | "passived" | "unknown";
   step?: number;
   category?: string;
   category_name?: string;
@@ -105,6 +105,8 @@ export function buildTree(
     visited?: ReadonlySet<string>;
     overrides?: Record<string, number>;
     emcValues?: EmcMap;
+    /** Items treated as leaf nodes — no further expansion */
+    passived?: ReadonlySet<string>;
     /** Memoization cache to prevent exponential blowup on DAGs */
     memo?: Map<string, TreeNode>;
   } = {}
@@ -117,6 +119,7 @@ export function buildTree(
     visited = new Set<string>(),
     overrides = {},
     emcValues = {},
+    passived = new Set<string>(),
     memo = new Map<string, TreeNode>(),
   } = opts;
 
@@ -133,6 +136,15 @@ export function buildTree(
   const memoKey = `${item}\0${step}`;
   const cached = memo.get(memoKey);
   if (cached) return cached;
+
+  // ── Passived check ──
+  // If the item is in the passived set, treat it as a leaf node
+  // regardless of whether recipes exist for it.
+  if (passived.has(item)) {
+    const result = { item, name: name ?? item, source: "passived" };
+    memo.set(memoKey, result);
+    return result;
+  }
 
   const options = recipes[item];
   if (!options?.length) {
@@ -189,6 +201,7 @@ export function buildTree(
             visited: childVisited,
             overrides,
             emcValues,
+            passived,
             memo,
           });
       return { ...child, qty: inp.qty ?? 1 };

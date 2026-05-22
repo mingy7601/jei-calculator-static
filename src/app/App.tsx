@@ -29,6 +29,9 @@ import {
   preWarmShards,
   resolveItemId,
   getLoadedRecipes,
+  getPassivedList,
+  savePassivedList,
+  loadPassivedList,
   type RecipeMap,
   type EmcMap,
 } from "./data";
@@ -38,7 +41,7 @@ import { loadState, saveState, clearState } from "./state-persist";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type NodeType = "root" | "service" | "module" | "component" | "resource" | "emc";
+type NodeType = "root" | "service" | "module" | "component" | "resource" | "emc" | "passived";
 
 interface TreeNode {
   id: string;
@@ -149,6 +152,7 @@ const TYPE_CONFIG: Record<NodeType, { dot: string; badge: string; text: string; 
   component: { dot: "#fb923c", badge: "rgba(251,146,60,0.12)",  text: "#fb923c", label: "MAX STEP",     bg: "rgba(251,146,60,0.06)" },
   resource:  { dot: "#94a3b8", badge: "rgba(148,163,184,0.09)", text: "#94a3b8", label: "Raw Resource", bg: "rgba(148,163,184,0.04)" },
   emc:       { dot: "#a855f7", badge: "rgba(168,85,247,0.12)",  text: "#a855f7", label: "EMC",          bg: "rgba(168,85,247,0.06)" },
+  passived:  { dot: "#facc15", badge: "rgba(250,204,21,0.12)",  text: "#facc15", label: "Passived",     bg: "rgba(250,204,21,0.06)" },
 };
 
 // Canvas color tokens (dark theme)
@@ -205,6 +209,8 @@ function rawToDisplay(node: RawTreeNode, isRoot = false): TreeNode {
     nodeType = "root";
   } else if (source === "emc") {
     nodeType = "emc";
+  } else if (source === "passived") {
+    nodeType = "passived";
   } else if (source === "base" || source === "unknown") {
     nodeType = "resource";
   } else if (!node.inputs?.length) {
@@ -242,7 +248,8 @@ function rawToDisplay(node: RawTreeNode, isRoot = false): TreeNode {
 
 async function loadTree(
   query: string,
-  overrides: Record<string, number> = {}
+  overrides: Record<string, number> = {},
+  passived: ReadonlySet<string> = new Set()
 ): Promise<{ displayTree: TreeNode; rawTree: RawTreeNode; recipes: RecipeMap; emcValues: EmcMap }> {
   const [itemId, emcValues] = await Promise.all([
     resolveItemId(query),
@@ -261,13 +268,13 @@ async function loadTree(
   })();
 
   const recipes = getLoadedRecipes();
-  const shallowTree = buildTree(itemId, recipes, 0, MAX_STEPS, { name: rootName, overrides, emcValues });
+  const shallowTree = buildTree(itemId, recipes, 0, MAX_STEPS, { name: rootName, overrides, emcValues, passived });
   const allIds = Array.from(collectItemIds(shallowTree));
 
   await preWarmShards(allIds);
 
   const fullRecipes = getLoadedRecipes();
-  const rawTree = buildTree(itemId, fullRecipes, 0, MAX_STEPS, { name: rootName, overrides, emcValues });
+  const rawTree = buildTree(itemId, fullRecipes, 0, MAX_STEPS, { name: rootName, overrides, emcValues, passived });
 
   return { displayTree: rawToDisplay(rawTree, true), rawTree, recipes: fullRecipes, emcValues };
 }
@@ -630,6 +637,11 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState(saved?.searchQuery ?? "");
   const [isLoading, setIsLoading] = useState(false);
 
+  // ── Passived list ───────────────────────────────────────────────────────
+  const [passivedSet, setPassivedSet] = useState<Set<string>>(new Set());
+  const [passivedList, setPassivedList] = useState<string[]>([]);
+  const [showPassivedPanel, setShowPassivedPanel] = useState(false);
+
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -723,7 +735,7 @@ export default function App() {
     (async () => {
       try {
         await getManifest();
-        const { displayTree, rawTree, recipes } = await loadTree(item, savedOverrides);
+        const { displayTree, rawTree, recipes } = await loadTree(item, savedOverrides, passivedSet);
         const unique = assignUniqueIds(displayTree);
         setTreeRoot(unique);
         setTreeExpanded(collectAllIds(unique));
@@ -736,6 +748,15 @@ export default function App() {
       }
     })();
   }, [saved]);
+
+  // ── Load passived list on mount ────────────────────────────────────────
+  useEffect(() => {
+    (async () => {
+      const set = await getPassivedList();
+      setPassivedSet(set);
+      setPassivedList(Array.from(set));
+    })();
+  }, []);
 
   const nodes = useMemo(
     () => (treeRoot ? buildLayout(treeRoot, 0, 0, treeExpanded, cardExpanded) : []),
@@ -924,7 +945,7 @@ export default function App() {
     if (!q || isLoading) return;
     setIsLoading(true);
     try {
-      const { displayTree, rawTree, recipes } = await loadTree(q, overrides);
+      const { displayTree, rawTree, recipes } = await loadTree(q, overrides, passivedSet);
       const unique = assignUniqueIds(displayTree);
       setTreeRoot(unique);
       setTreeExpanded(collectAllIds(unique));
@@ -1161,7 +1182,7 @@ export default function App() {
       setAltPanel(null);
       setIsLoading(true);
       try {
-        const { displayTree, rawTree, recipes } = await loadTree(searchQuery, newOverrides);
+        const { displayTree, rawTree, recipes } = await loadTree(searchQuery, newOverrides, passivedSet);
         const uniqueTree = assignUniqueIds(displayTree);
         setTreeRoot(uniqueTree);
         setLoadedRecipes(recipes);
@@ -1396,6 +1417,15 @@ export default function App() {
               >
                 Clear saved
               </button>
+              <button
+                onClick={() => setShowPassivedPanel((p) => !p)}
+                className={`text-xs px-2.5 py-1 rounded border border-border hover:text-foreground hover:border-white/20 transition-colors ${
+                  showPassivedPanel ? "text-yellow-400 border-yellow-400/30" : "text-muted-foreground"
+                }`}
+                title="Manage passived items (leaf nodes that won't be expanded)"
+              >
+                ⚡ Passived ({passivedList.length})
+              </button>
             </div>
           </header>
 
@@ -1533,6 +1563,111 @@ export default function App() {
                   )}
                 </div>
               )}
+            </div>
+          )}
+
+          {/* ── Passived panel ── */}
+          {showPassivedPanel && (
+            <div
+              style={{
+                position: "absolute",
+                left: "50%",
+                top: "60px",
+                transform: "translateX(-50%)",
+                width: 340,
+                zIndex: 60,
+                background: "#0e0e1a",
+                border: "1px solid rgba(250,204,21,0.25)",
+                borderRadius: 10,
+                boxShadow: "0 8px 32px rgba(0,0,0,0.55)",
+                fontFamily: "'JetBrains Mono', monospace",
+                overflow: "hidden",
+              }}
+            >
+              <div className="px-3 py-2 border-b border-border flex items-center justify-between" style={{ background: "rgba(250,204,21,0.06)" }}>
+                <span className="text-[11px] font-medium text-yellow-400">Passived Items</span>
+                <button
+                  onClick={() => setShowPassivedPanel(false)}
+                  className="text-[10px] text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  ✕
+                </button>
+              </div>
+              <div className="p-3">
+                <div className="text-[10px] text-muted-foreground mb-2">
+                  Passived items are treated as leaf nodes — no recipe expansion occurs for them. Changes are saved to localStorage.
+                </div>
+                {/* Add new item */}
+                <div className="flex gap-2 mb-2">
+                  <input
+                    type="text"
+                    id="passived-input"
+                    placeholder="Item ID to add…"
+                    className="flex-1 h-7 px-2 text-[11px] rounded border border-border bg-transparent text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-yellow-400/40 transition-colors"
+                    style={{ fontFamily: "'JetBrains Mono', monospace" }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        const input = e.currentTarget;
+                        const val = input.value.trim();
+                        if (val && !passivedList.includes(val)) {
+                          const next = [...passivedList, val];
+                          setPassivedList(next);
+                          savePassivedList(next);
+                          setPassivedSet(new Set(next));
+                          input.value = "";
+                          toast.success(`"${val}" added to passived — reload tree to apply`);
+                        }
+                      }
+                    }}
+                  />
+                  <button
+                    onClick={() => {
+                      const input = document.getElementById("passived-input") as HTMLInputElement;
+                      const val = input.value.trim();
+                      if (val && !passivedList.includes(val)) {
+                        const next = [...passivedList, val];
+                        setPassivedList(next);
+                        savePassivedList(next);
+                        setPassivedSet(new Set(next));
+                        input.value = "";
+                        toast.success(`"${val}" added to passived — reload tree to apply`);
+                      }
+                    }}
+                    className="h-7 px-3 text-[11px] rounded border border-yellow-400/30 text-yellow-400 hover:bg-yellow-400/10 transition-colors"
+                  >
+                    Add
+                  </button>
+                </div>
+                {/* Current passived list */}
+                <div className="space-y-1 max-h-40 overflow-y-auto">
+                  {passivedList.length === 0 ? (
+                    <div className="text-[10px] text-muted-foreground text-center py-2">No passived items</div>
+                  ) : (
+                    passivedList.map((item) => (
+                      <div
+                        key={item}
+                        className="flex items-center justify-between gap-2 px-2 py-1 rounded text-[11px]"
+                        style={{ background: "rgba(250,204,21,0.06)" }}
+                      >
+                        <span className="text-foreground truncate">{item}</span>
+                        <button
+                          onClick={() => {
+                            const next = passivedList.filter((i) => i !== item);
+                            setPassivedList(next);
+                            savePassivedList(next);
+                            setPassivedSet(new Set(next));
+                            toast.info(`"${item}" removed from passived — reload tree to apply`);
+                          }}
+                          className="text-xs text-muted-foreground hover:text-red-400 transition-colors shrink-0"
+                          title="Remove"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
             </div>
           )}
 

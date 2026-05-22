@@ -190,3 +190,73 @@ export function getLoadedRecipes(): RecipeMap {
   }
   return merged;
 }
+
+// ── Passived list ─────────────────────────────────────────────────────────────
+
+const PASSIVED_CONFIG_URL = `${DATA_BASE}/passived.json`;
+
+/**
+ * Load the passived items list.
+ *
+ * Strategy:
+ *   1. If the user has a saved list in localStorage, return that.
+ *   2. Otherwise, load the default list from the config JSON file.
+ *   3. If neither exists, return an empty list.
+ *
+ * The config file acts as the initial default. Once the user modifies the
+ * list via the UI, their changes are persisted to localStorage and take
+ * precedence over the config.
+ */
+export async function getPassivedList(): Promise<Set<string>> {
+  // Check localStorage first — user has customized the list
+  try {
+    const raw = localStorage.getItem("jei-calc:passived");
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return new Set(parsed);
+      }
+    }
+  } catch {
+    // ignore malformed localStorage data
+  }
+
+  // Fall back to config defaults
+  try {
+    const res = await fetch(PASSIVED_CONFIG_URL);
+    if (res.ok) {
+      const configItems = (await res.json()) as string[];
+      return new Set(configItems);
+    }
+  } catch {
+    // config not available — return empty set
+  }
+
+  return new Set();
+}
+
+/**
+ * Save the full passived list to localStorage.
+ * Called when the user adds or removes items via the UI.
+ */
+export function savePassivedList(items: string[]): void {
+  try {
+    localStorage.setItem("jei-calc:passived", JSON.stringify(items));
+  } catch {
+    // ignore
+  }
+}
+
+/** Load the user's passived list from localStorage (no fallback). */
+export function loadPassivedList(): string[] {
+  try {
+    const raw = localStorage.getItem("jei-calc:passived");
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {
+    // ignore
+  }
+  return [];
+}
