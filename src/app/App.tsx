@@ -34,6 +34,7 @@ import {
 } from "./data";
 import { buildTree, wouldCycle, collectItemIds, type TreeNode as RawTreeNode } from "./tree";
 import { sumLeafIngredients } from "./ingredients";
+import { loadState, saveState, clearState } from "./state-persist";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -588,7 +589,12 @@ function drawNode(
 const VIEWPORT_PAD = 120;
 
 export default function App() {
-  const [overrides, setOverrides] = useState<Record<string, number>>({});
+  // ── Load persisted state on mount ────────────────────────────────────────
+  const saved = useMemo(() => loadState(), []);
+
+  const [overrides, setOverrides] = useState<Record<string, number>>(
+    saved?.overrides ?? {}
+  );
   const [altPanel, setAltPanel] = useState<{
     nodeId: string;
     realItemId: string;
@@ -604,7 +610,7 @@ export default function App() {
 
   const [treeExpanded, setTreeExpanded] = useState<Set<string>>(new Set());
   const [cardExpanded, setCardExpanded] = useState<Set<string>>(new Set());
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(saved?.selected ?? null);
 
   const [leafGroups, setLeafGroups] = useState<Record<string, LeafGroup>>({});
 
@@ -616,11 +622,12 @@ export default function App() {
   const [highlightedIds, setHighlightedIds] = useState<Set<string>>(new Set());
   const [highlightMatchList, setHighlightMatchList] = useState<LayoutNode[]>([]);
   const [highlightIdx, setHighlightIdx] = useState(-1);
+  const lastSearchQuery = useRef("");
 
   // Pan + zoom transform
   const [transform, setTransform] = useState<Transform>({ x: 48, y: 56, k: 1 });
 
-  const [searchQuery, setSearchQuery] = useState("");
+  const [searchQuery, setSearchQuery] = useState(saved?.searchQuery ?? "");
   const [isLoading, setIsLoading] = useState(false);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -634,6 +641,30 @@ export default function App() {
 
   // Hover state
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
+
+  // ── Persist state to localStorage ────────────────────────────────────────
+  const persistState = useCallback(() => {
+    saveState({
+      v: 1,
+      searchQuery,
+      overrides,
+      selected,
+    });
+  }, [searchQuery, overrides, selected]);
+
+  // Save on page unload as safety net (inline to avoid stale closure)
+  useEffect(() => {
+    const onSave = () => {
+      saveState({
+        v: 1,
+        searchQuery,
+        overrides,
+        selected,
+      });
+    };
+    window.addEventListener("beforeunload", onSave);
+    return () => window.removeEventListener("beforeunload", onSave);
+  }, [searchQuery, overrides, selected]);
 
   // Track viewport size for culling
   useEffect(() => {
@@ -679,15 +710,20 @@ export default function App() {
     return () => canvas.removeEventListener("wheel", handler);
   }, [treeRoot]);
 
-  // Load manifest + default item on mount
+  // Load manifest + default item (or restored search query + overrides) on mount
   useEffect(() => {
-    const defaultItem = "mythic machine case";
-    setSearchQuery(defaultItem);
+    const savedQuery = saved?.searchQuery;
+    const savedOverrides = saved?.overrides ?? {};
+    const item = (savedQuery && savedQuery.length > 0) ? savedQuery : "mythic machine case";
+    // Restore search query so the search bar shows the correct value
+    setSearchQuery(item);
+    // Restore overrides so alternatives are applied
+    setOverrides(savedOverrides);
     setIsLoading(true);
     (async () => {
       try {
         await getManifest();
-        const { displayTree, rawTree, recipes } = await loadTree(defaultItem);
+        const { displayTree, rawTree, recipes } = await loadTree(item, savedOverrides);
         const unique = assignUniqueIds(displayTree);
         setTreeRoot(unique);
         setTreeExpanded(collectAllIds(unique));
@@ -699,7 +735,7 @@ export default function App() {
         setIsLoading(false);
       }
     })();
-  }, []);
+  }, [saved]);
 
   const nodes = useMemo(
     () => (treeRoot ? buildLayout(treeRoot, 0, 0, treeExpanded, cardExpanded) : []),
@@ -888,7 +924,7 @@ export default function App() {
     if (!q || isLoading) return;
     setIsLoading(true);
     try {
-      const { displayTree, rawTree, recipes } = await loadTree(q, {});
+      const { displayTree, rawTree, recipes } = await loadTree(q, overrides);
       const unique = assignUniqueIds(displayTree);
       setTreeRoot(unique);
       setTreeExpanded(collectAllIds(unique));
@@ -898,8 +934,9 @@ export default function App() {
       setTransform({ x: 48, y: 56, k: 1 });
       setLoadedRecipes(recipes);
       setItems(sumLeafIngredients(rawTree));
-      setOverrides({});
       toast.success(`Loaded: ${displayTree.label}`);
+      // Persist after tree load
+      persistState();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to load tree");
     } finally {
@@ -941,7 +978,8 @@ export default function App() {
     if (rafId.current !== null) {
       cancelAnimationFrame(rafId.current);
       rafId.current = null;
-      setTransform({ ...pendingTransform.current });
+      const final = { ...pendingTransform.current };
+      setTransform(final);
     }
   }, []);
 
@@ -1013,6 +1051,8 @@ export default function App() {
         const sh = node.height * transform.k;
         if (mx >= s.x && mx <= s.x + sw && my >= s.y && my <= s.y + sh) {
           setSelected(node.id);
+          // Persist selected node
+          persistState();
           return;
         }
       }
@@ -1157,6 +1197,8 @@ export default function App() {
         setTreeExpanded(newExpanded);
         setCardExpanded(newCardExpanded);
         setSelected(null);
+        // Persist overrides after selecting alternative
+        persistState();
       } catch (err) {
         toast.error(err instanceof Error ? err.message : "Failed to reload tree");
       } finally {
@@ -1178,6 +1220,31 @@ export default function App() {
         setHighlightedIds(new Set());
         setHighlightMatchList([]);
         setHighlightIdx(-1);
+        return;
+      }
+
+      // If query changed since last search, recompute matches
+      if (q !== lastSearchQuery.current) {
+        lastSearchQuery.current = q;
+        const matches: LayoutNode[] = [];
+        for (const n of nodes) {
+          if (
+            n.label.toLowerCase().includes(q) ||
+            (n.itemId && n.itemId.toLowerCase().includes(q))
+          ) {
+            matches.push(n);
+          }
+        }
+        setHighlightMatchList(matches);
+        setHighlightedIds(new Set(matches.map((n) => n.id)));
+        setHighlightIdx(0);
+        setTransform({
+          x: (containerRef.current?.clientWidth || window.innerWidth) / 2 - matches[0].x,
+          y: (containerRef.current?.clientHeight || window.innerHeight) / 2 - matches[0].y,
+          k: transform.k,
+        });
+        setSelected(matches[0].id);
+        setActiveLeafItemId(null);
         return;
       }
 
@@ -1268,7 +1335,11 @@ export default function App() {
                 <input
                   type="text"
                   value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onChange={(e) => {
+                    setSearchQuery(e.target.value);
+                    // Persist search query as user types
+                    persistState();
+                  }}
                   placeholder="Search or enter an ID to load as root…"
                   disabled={isLoading}
                   className="w-full h-7 pl-8 pr-3 text-xs rounded border border-border bg-transparent text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-[rgba(34,211,238,0.4)] focus:ring-1 focus:ring-[rgba(34,211,238,0.15)] transition-colors disabled:opacity-50"
@@ -1308,6 +1379,23 @@ export default function App() {
                   {label}
                 </button>
               ))}
+              <button
+                onClick={() => {
+                  // Only clear overrides (alternative recipes), keep search query and tree
+                  setOverrides({});
+                  saveState({
+                    v: 1,
+                    searchQuery: saved?.searchQuery ?? "",
+                    overrides: {},
+                    selected: null,
+                  });
+                  toast.info("Alternative recipes cleared — tree preserved");
+                }}
+                className="text-xs px-2.5 py-1 rounded border border-border text-muted-foreground hover:text-foreground hover:border-white/20 transition-colors"
+                title="Clear alternative recipes only (search query and tree are preserved)"
+              >
+                Clear saved
+              </button>
             </div>
           </header>
 
