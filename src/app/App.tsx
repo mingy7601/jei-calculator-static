@@ -37,7 +37,7 @@ import { sumLeafIngredients } from "./ingredients";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type NodeType = "root" | "module" | "component" | "resource" | "emc";
+type NodeType = "root" | "service" | "module" | "component" | "resource" | "emc";
 
 interface TreeNode {
   id: string;
@@ -68,7 +68,7 @@ type ItemsData = Record<string, { name: string; qty: number }>;
 
 // ─── Layout engine ─────────────────────────────────────────────────────────────
 
-const NODE_W = 320;
+const NODE_W = 300;
 const NODE_H_BASE = 80;
 const NODE_H_IMAGE = 152;
 const COL_GAP = 76;
@@ -143,6 +143,7 @@ function canvasToScreen(tx: Transform, cx: number, cy: number): { x: number; y: 
 
 const TYPE_CONFIG: Record<NodeType, { dot: string; badge: string; text: string; label: string; bg: string }> = {
   root:      { dot: "#22d3ee", badge: "rgba(34,211,238,0.12)",  text: "#22d3ee", label: "root",        bg: "rgba(34,211,238,0.06)" },
+  service:   { dot: "#a78bfa", badge: "rgba(167,139,250,0.12)", text: "#a78bfa", label: "service",     bg: "rgba(167,139,250,0.06)" },
   module:    { dot: "#34d399", badge: "rgba(52,211,153,0.12)",  text: "#34d399", label: "Crafting",     bg: "rgba(52,211,153,0.06)" },
   component: { dot: "#fb923c", badge: "rgba(251,146,60,0.12)",  text: "#fb923c", label: "MAX STEP",     bg: "rgba(251,146,60,0.06)" },
   resource:  { dot: "#94a3b8", badge: "rgba(148,163,184,0.09)", text: "#94a3b8", label: "Raw Resource", bg: "rgba(148,163,184,0.04)" },
@@ -215,7 +216,7 @@ function rawToDisplay(node: RawTreeNode, isRoot = false): TreeNode {
   const label = outputName ?? node.name ?? itemId;
   const qty = node.qty ?? 1;
   const qtyStr = Number.isInteger(qty) ? String(qty) : qty.toFixed(1);
-  const displayLabel = `${label}`;
+  const displayLabel = `${label} x ${qtyStr}`;
 
   const meta = nodeType === "emc" ? "emc" : (node.category_name ?? "N/A");
   const imageUrl = node.image_path ? `/static/${node.image_path}` : undefined;
@@ -357,7 +358,7 @@ function hexToRgba(hex: string, alpha: number): string {
 interface NodeHitBoxes {
   expandTriangle: { x: number; y: number; w: number; h: number } | null;
   altDoubleArrow: { x: number; y: number; w: number; h: number } | null;
-  tab: { x: number; y: number; w: number; h: number } | null;
+  toggleStrip: { x: number; y: number; w: number; h: number } | null;
 }
 
 function getNodeHitBoxes(
@@ -368,26 +369,26 @@ function getNodeHitBoxes(
   const sw = NODE_W * tx.k;
   const sh = node.height * tx.k;
 
-  const expandY = s.y + sh / 2 - 14 * tx.k;
+  const expandY = s.y + 18;
 
   return {
     expandTriangle: {
-      x: s.x + sw - 48 * tx.k,
-      y: expandY,
-      w: 32 * tx.k,
-      h: 28 * tx.k,
+      x: s.x + sw - 40 * tx.k,
+      y: expandY - 10 * tx.k,
+      w: 24 * tx.k,
+      h: 20 * tx.k,
     },
     altDoubleArrow: {
-      x: s.x + 16 * tx.k,
-      y: s.y + (sh - 28) * tx.k,
+      x: s.x + 14 * tx.k,
+      y: s.y + 38 * tx.k,
       w: 28 * tx.k,
       h: 16 * tx.k,
     },
-    tab: {
+    toggleStrip: {
       x: s.x,
-      y: s.y + (sh - 10) * tx.k,
+      y: s.y + sh - 22 * tx.k,
       w: sw,
-      h: 10 * tx.k,
+      h: 22 * tx.k,
     },
   };
 }
@@ -413,25 +414,17 @@ function drawNode(
   bgColor: string,
   dotColor: string
 ) {
-  const r = NODE_RADIUS;
   const x = node.x;
   const y = node.y;
   const w = NODE_W;
   const h = node.height;
 
   // ── Background ──
-  ctx.fillStyle = bgColor;
+  ctx.fillStyle = isSelected
+    ? "rgba(34,211,238,0.045)"
+    : bgColor;
   ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.lineTo(x + w - r, y);
-  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
-  ctx.lineTo(x + w, y + h - r);
-  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
-  ctx.lineTo(x + r, y + h);
-  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
-  ctx.lineTo(x, y + r);
-  ctx.quadraticCurveTo(x, y, x + r, y);
-  ctx.closePath();
+  ctx.roundRect(x, y, w, h, 8);
   ctx.fill();
 
   // ── Border ──
@@ -445,88 +438,29 @@ function drawNode(
   ctx.arc(x + 14, y + 18, 3, 0, Math.PI * 2);
   ctx.fill();
 
-  // ── Top bar: Name + qty ──
-  const topY = y + 16;
-  const topH = 28;
-
-  // Name background box
-  const nameW = 180;
-  const nameX = x + 16;
-  const nameY = topY;
-  ctx.fillStyle = hexToRgba(dotColor, 0.08);
-  ctx.beginPath();
-  ctx.roundRect(nameX, nameY, nameW, topH, 4);
-  ctx.fill();
-
-  // Name text (truncated)
-  ctx.fillStyle = isSelected || isHovered ? dotColor : "rgba(255,255,255,0.85)";
-  ctx.font = `500 12px Inter, sans-serif`;
+  // ── Label ──
+  ctx.fillStyle = isSelected || isHovered ? dotColor : "rgba(255,255,255,0.9)";
+  ctx.font = "500 13px Inter, sans-serif";
+  ctx.textBaseline = "middle";
   const label = node.label;
-  const maxNameW = nameW - 12;
+  const maxW = w - 60;
   let displayLabel = label;
-  if (ctx.measureText(label).width > maxNameW) {
-    while (ctx.measureText(displayLabel + "…").width > maxNameW && displayLabel.length > 0) {
+  if (ctx.measureText(label).width > maxW) {
+    while (
+      ctx.measureText(displayLabel + "…").width > maxW &&
+      displayLabel.length > 0
+    ) {
       displayLabel = displayLabel.slice(0, -1);
     }
     displayLabel += "…";
   }
-  ctx.fillText(displayLabel, nameX + 8, nameY + 18);
+  ctx.fillText(displayLabel, x + 24, y + 18);
 
-  // "×" separator
-  ctx.fillStyle = "rgba(255,255,255,0.5)";
-  ctx.font = `400 14px sans-serif`;
-  ctx.fillText("×", nameX + nameW + 8, topY + 18);
-
-  // Qty badge
-  const qtyStr = String(node.qty ?? 1);
-  const qtyW = ctx.measureText(qtyStr).width + 14;
-  const qtyX = nameX + nameW + 22;
-  const qtyY = topY;
-  ctx.fillStyle = hexToRgba(dotColor, 0.12);
-  ctx.beginPath();
-  ctx.roundRect(qtyX, qtyY, qtyW, topH, 4);
-  ctx.fill();
-  ctx.fillStyle = dotColor;
-  ctx.font = `600 11px "JetBrains Mono", monospace`;
-  ctx.fillText(qtyStr, qtyX + 6, qtyY + 18);
-
-  // ── Middle-right: expand/collapse triangle (▶ / ▸) ──
-  if (node.children?.length) {
-    const triCx = x + w - 28;
-    const triCy = y + h / 2;
-    const triSize = 14;
-
-    // Triangle background circle
-    ctx.fillStyle = hexToRgba(dotColor, 0.08);
-    ctx.beginPath();
-    ctx.arc(triCx, triCy, triSize + 2, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Triangle border
-    ctx.strokeStyle = hexToRgba(dotColor, 0.18);
-    ctx.lineWidth = 0.8;
-    ctx.beginPath();
-    ctx.arc(triCx, triCy, triSize + 2, 0, Math.PI * 2);
-    ctx.stroke();
-
-    // Triangle icon (play / expand)
-    ctx.fillStyle = dotColor;
-    ctx.beginPath();
-    ctx.moveTo(triCx - 4, triCy - 7);
-    ctx.lineTo(triCx - 4, triCy + 7);
-    ctx.lineTo(triCx + 6, triCy);
-    ctx.closePath();
-    ctx.fill();
-  }
-
-  // ── Bottom info bar ──
-  const infoY = y + h - 28;
-
-  // ── Show alternatives button (double-arrow symbol ⇅) ──
+  // ── Show alternatives button (⇅) ──
   const altBtnW = 28;
   const altBtnH = 16;
-  const altBtnX = x + 16;
-  const altBtnY = infoY;
+  const altBtnX = x + 14;
+  const altBtnY = y + 38;
 
   // Button background
   ctx.fillStyle = hexToRgba(dotColor, 0.12);
@@ -541,22 +475,22 @@ function drawNode(
   ctx.roundRect(altBtnX, altBtnY, altBtnW, altBtnH, 4);
   ctx.stroke();
 
-  // Double-arrow symbol (two arrows facing different directions on top of each other)
+  // Double-arrow symbol
   ctx.fillStyle = dotColor;
-  ctx.font = `bold 11px sans-serif`;
+  ctx.font = "bold 11px sans-serif";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillText("⇅", altBtnX + altBtnW / 2, altBtnY + altBtnH / 2);
   ctx.textAlign = "left";
   ctx.textBaseline = "alphabetic";
 
-  // ── Crafting method badge ──
+  // ── Meta badge (to the right of alternatives button) ──
   if (node.meta) {
     const badgeText = node.meta;
     const badgeW = ctx.measureText(badgeText).width + 10;
     const badgeH = 16;
     const badgeX = altBtnX + altBtnW + 6;
-    const badgeY = infoY + 1;
+    const badgeY = altBtnY + 1;
 
     ctx.fillStyle = hexToRgba(dotColor, 0.12);
     ctx.beginPath();
@@ -564,44 +498,88 @@ function drawNode(
     ctx.fill();
 
     ctx.fillStyle = dotColor;
-    ctx.font = `500 9px "JetBrains Mono", monospace`;
+    ctx.font = "500 9px 'JetBrains Mono', monospace";
     ctx.fillText(badgeText, badgeX + 5, badgeY + 12);
   }
 
-  // ── Children count (right-aligned on same line) ──
+  // ── Children count ──
   if (node.children?.length) {
     const childText = `${node.children.length} children`;
-    const childW = ctx.measureText(childText).width;
-    const childX = x + w - 16 - childW;
-    const childY = infoY + 1;
-
-    ctx.fillStyle = "rgba(255,255,255,0.35)";
-    ctx.font = `400 9px "JetBrains Mono", monospace`;
-    ctx.fillText(childText, childX, childY + 11);
+    const textW = ctx.measureText(childText).width;
+    ctx.fillStyle = "rgba(255,255,255,0.4)";
+    ctx.font = "400 10px 'JetBrains Mono', monospace";
+    ctx.fillText(childText, x + w - textW - 14, y + 48);
   }
 
-  // ── Colored tab at bottom ──
-  const tabH = 10;
-  const tabY = y + h - tabH;
+  // ── Expand/collapse indicator ──
+  if (node.children?.length) {
+    const triCx = x + w - 28;
+    const triCy = y + 18;
+    ctx.fillStyle = dotColor;
+    ctx.beginPath();
+    if (isTreeEx) {
+      // Expanded: chevron down
+      ctx.moveTo(triCx - 4, triCy - 2);
+      ctx.lineTo(triCx, triCy + 2);
+      ctx.lineTo(triCx + 4, triCy - 2);
+    } else {
+      // Collapsed: chevron right
+      ctx.moveTo(triCx - 2, triCy - 4);
+      ctx.lineTo(triCx + 2, triCy);
+      ctx.lineTo(triCx - 2, triCy + 4);
+    }
+    ctx.closePath();
+    ctx.fill();
+  }
 
-  ctx.fillStyle = hexToRgba(dotColor, 0.15);
+  // ── Image panel (if expanded) ──
+  if (isCardEx) {
+    const imgY = y + NODE_H_BASE;
+    const imgH = NODE_H_IMAGE;
+
+    // Separator line
+    ctx.strokeStyle = "rgba(255,255,255,0.07)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x, imgY);
+    ctx.lineTo(x + w, imgY);
+    ctx.stroke();
+
+    // Image background
+    ctx.fillStyle = "rgba(255,255,255,0.02)";
+    ctx.fillRect(x, imgY, w, imgH);
+  }
+
+  // ── Toggle strip at bottom ──
+  const stripH = 22;
+  const stripY = y + h - stripH;
+
+  // Separator line
+  ctx.strokeStyle = "rgba(255,255,255,0.07)";
+  ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.rect(x, tabY, w, tabH);
-  ctx.fill();
+  ctx.moveTo(x, stripY);
+  ctx.lineTo(x + w, stripY);
+  ctx.stroke();
 
-  // ── Center chevron down in tab (show image) ──
+  // Chevron down icon
   const chevCx = x + w / 2;
-  const chevCy = y + h - tabH / 2;
-  const chevSize = 5;
-
-  ctx.strokeStyle = dotColor;
+  const chevCy = stripY + stripH / 2;
+  ctx.strokeStyle = "rgba(255,255,255,0.4)";
   ctx.lineWidth = 1.5;
   ctx.lineCap = "round";
-  ctx.lineJoin = "round";
   ctx.beginPath();
-  ctx.moveTo(chevCx - chevSize, chevCy - chevSize / 2);
-  ctx.lineTo(chevCx, chevCy + chevSize / 2);
-  ctx.lineTo(chevCx + chevSize, chevCy - chevSize / 2);
+  if (isCardEx) {
+    // Up chevron when expanded
+    ctx.moveTo(chevCx - 5, chevCy + 2);
+    ctx.lineTo(chevCx, chevCy - 2);
+    ctx.lineTo(chevCx + 5, chevCy + 2);
+  } else {
+    // Down chevron when collapsed
+    ctx.moveTo(chevCx - 5, chevCy - 2);
+    ctx.lineTo(chevCx, chevCy + 2);
+    ctx.lineTo(chevCx + 5, chevCy - 2);
+  }
   ctx.stroke();
 }
 
@@ -998,21 +976,23 @@ export default function App() {
           const realItemId = node.itemId ?? node.id;
           const options = getAlternatives(realItemId, loadedRecipes);
           if (options.length > 0) {
+            const panelCols = Math.ceil(options.length / 8);
+            const panelW = panelCols * 260;
             setAltPanel({
               nodeId: node.id,
               realItemId,
-              x: node.x,
-              y: node.y + node.height - 40,
+              x: node.x - panelW,
+              y: node.y + 38 + 16,
               options,
             });
           }
           return;
         }
 
-        // Tab hit → toggle card expand (show image)
+        // Toggle strip hit → toggle card expand (show image)
         if (
-          boxes.tab &&
-          isPointInRect(mx, my, boxes.tab.x, boxes.tab.y, boxes.tab.w, boxes.tab.h)
+          boxes.toggleStrip &&
+          isPointInRect(mx, my, boxes.toggleStrip.x, boxes.toggleStrip.y, boxes.toggleStrip.w, boxes.toggleStrip.h)
         ) {
           setCardExpanded((prev) => {
             const next = new Set(prev);
@@ -1415,7 +1395,7 @@ export default function App() {
                     fontFamily: "'JetBrains Mono', monospace",
                     overflow: "hidden",
                     transform: `scale(${transform.k})`,
-                    transformOrigin: "0 0",
+                    transformOrigin: "left top",
                     pointerEvents: "auto",
                   }}
                 >
@@ -1460,80 +1440,91 @@ export default function App() {
           )}
 
           {/* ── Status bar ── */}
-          <footer className="shrink-0 flex items-center justify-between border-t border-border px-5 h-7 text-[11px] text-muted-foreground" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
+          <footer
+            className="shrink-0 flex items-center justify-between border-t border-border px-5 h-7 text-[11px] text-muted-foreground"
+            style={{ fontFamily: "'JetBrains Mono', monospace" }}
+          >
             <div className="flex items-center gap-3">
-              <span className="tabular-nums">x:{Math.round(-transform.x)}&nbsp;&nbsp;y:{Math.round(-transform.y)}&nbsp;&nbsp;{Math.round(transform.k * 100)}%</span>
+              <span className="tabular-nums">
+                x:{Math.round(-transform.x)}&nbsp;&nbsp;y:
+                {Math.round(-transform.y)}
+              </span>
               {selected && byId.has(selected) && (
                 <>
                   <span className="opacity-30">·</span>
-                  <span style={{ color: "#22d3ee" }}>{byId.get(selected)!.label}</span>
-                  <span style={{ color: TYPE_CONFIG[byId.get(selected)!.type].dot }} className="opacity-70">
+                  <span style={{ color: "#22d3ee" }}>
+                    {byId.get(selected)!.label}
+                  </span>
+                  <span
+                    style={{
+                      color:
+                        TYPE_CONFIG[byId.get(selected)!.type].dot,
+                    }}
+                    className="opacity-70"
+                  >
                     {TYPE_CONFIG[byId.get(selected)!.type].label}
                   </span>
                 </>
               )}
             </div>
-            <span>drag to pan&nbsp;&nbsp;·&nbsp;&nbsp;scroll to zoom&nbsp;&nbsp;·&nbsp;&nbsp;click to select</span>
+            <span>
+              drag to pan&nbsp;&nbsp;·&nbsp;&nbsp;scroll to zoom&nbsp;&nbsp;·&nbsp;&nbsp;▸
+              children&nbsp;&nbsp;·&nbsp;&nbsp;∨ image
+            </span>
           </footer>
         </div>
 
         {/* ── Sidebar ── */}
-        <div className="shrink-0 flex flex-col border-l border-border" style={{ width: 460, background: "#0a0a0f" }}>
-          <div className="shrink-0 h-12 flex items-center px-4 border-b border-border">
-            <span className="w-1.5 h-1.5 rounded-full mr-2" style={{ background: "#94a3b8" }} />
-            <span className="text-lg font-semibold tracking-tight">Raw Materials</span>
+        <div
+          className="shrink-0 flex flex-col border-l border-border"
+          style={{ width: 280, background: "#0a0a0f" }}
+        >
+          <div className="shrink-0 h-8 flex items-center px-3 border-b border-border">
+            <span
+              className="text-[11px] font-medium text-muted-foreground tracking-tight"
+              style={{
+                fontFamily: "'JetBrains Mono', monospace",
+              }}
+            >
+              RAW MATERIALS
+            </span>
           </div>
-          <div className="flex-1 overflow-y-auto p-3">
+          <div className="flex-1 overflow-y-auto px-2 py-2">
             {Object.keys(items).length === 0 ? (
-              <div className="text-center text-xs text-muted-foreground py-8">No materials loaded</div>
+              <div className="text-center text-[10px] text-muted-foreground py-6">
+                No materials
+              </div>
             ) : (
-              <div className="space-y-1.5">
+              <div className="space-y-px">
                 {Object.entries(items)
                   .sort(([, a], [, b]) => b.qty - a.qty)
-                  .map(([key, item]) => {
-                    const group = leafGroupsMerged[key];
-                    const leafCount = leafCountPerItem.get(key) ?? 0;
-                    const cycleIdx = group ? group.selectedIndex : -1;
-                    const hasEmc = emcItems.has(key);
-                    return (
+                  .map(([key, item]) => (
                     <div
                       key={key}
-                      className="flex items-center px-3 py-2 rounded-lg border border-border cursor-pointer hover:bg-white/[0.03] transition-colors"
-                      style={{ background: "var(--card)" }}
-                      onClick={() => handleLeafClick(key)}
+                      className="flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer hover:bg-white/[0.04] transition-colors"
                     >
-                      <span className="text-xs text-foreground truncate flex-1 min-w-0 mr-2" title={item.name}>{item.name}</span>
-                      <span className="text-[10px] shrink-0 px-1 py-px rounded" style={{ background: "rgba(148,163,184,0.1)", color: "#94a3b8", fontFamily: "'JetBrains Mono', monospace" }}>
-                        ×{item.qty % 1 === 0 ? item.qty.toFixed(0) : item.qty.toFixed(1)}
-                      </span>
-                      {leafCount > 0 && (
-                        <span
-                          className="text-[10px] shrink-0 px-1 py-px rounded"
-                          style={{ background: "rgba(34,211,238,0.1)", color: "#22d3ee", fontFamily: "'JetBrains Mono', monospace" }}
-                          title="Click to cycle through nodes"
-                        >
-                          {group ? `${cycleIdx + 1}/${leafCount}` : `1/${leafCount}`}
-                        </span>
-                      )}
                       <span
-                        className="text-[10px] shrink-0 px-1 py-px rounded"
-                        style={{
-                          background: hasEmc ? "rgba(168,85,247,0.15)" : "rgba(255,255,255,0.03)",
-                          color: hasEmc ? "#a855f7" : "transparent",
-                          fontFamily: "'JetBrains Mono', monospace",
-                        }}
-                        title={hasEmc ? "Has EMC value" : undefined}
+                        className="text-[11px] text-foreground truncate flex-1 min-w-0"
+                        title={item.name}
                       >
-                        emc
+                        {item.name}
+                      </span>
+                      <span
+                        className="text-[10px] tabular-nums"
+                        style={{
+                          color: "#94a3b8",
+                          fontFamily:
+                            "'JetBrains Mono', monospace",
+                        }}
+                      >
+                        {item.qty % 1 === 0
+                          ? item.qty.toFixed(0)
+                          : item.qty.toFixed(1)}
                       </span>
                     </div>
-                  );
-                })}
+                  ))}
               </div>
             )}
-          </div>
-          <div className="shrink-0 h-7 flex items-center px-4 border-t border-border text-[11px] text-muted-foreground" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
-            {Object.keys(items).length} material{Object.keys(items).length !== 1 ? "s" : ""}
           </div>
         </div>
       </div>
