@@ -46,6 +46,7 @@ interface TreeNode {
   type: NodeType;
   meta?: string;
   imageUrl?: string;
+  qty?: number;
   children?: TreeNode[];
 }
 
@@ -214,7 +215,7 @@ function rawToDisplay(node: RawTreeNode, isRoot = false): TreeNode {
   const label = outputName ?? node.name ?? itemId;
   const qty = node.qty ?? 1;
   const qtyStr = Number.isInteger(qty) ? String(qty) : qty.toFixed(1);
-  const displayLabel = `${label} ×${qtyStr}`;
+  const displayLabel = `${label}`;
 
   const meta = nodeType === "emc" ? "emc" : (node.category_name ?? "N/A");
   const imageUrl = node.image_path ? `/static/${node.image_path}` : undefined;
@@ -225,6 +226,7 @@ function rawToDisplay(node: RawTreeNode, isRoot = false): TreeNode {
     type: nodeType,
     meta,
     imageUrl,
+    qty,
   };
 
   if (node.inputs?.length) {
@@ -341,12 +343,72 @@ function drawEdge(
   ctx.stroke();
 }
 
+// ─── Hex → rgba helper ───────────────────────────────────────────────────────
+
+function hexToRgba(hex: string, alpha: number): string {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
+// ─── Interactive element hit-boxes for a node ────────────────────────────────
+
+interface NodeHitBoxes {
+  expandTriangle: { x: number; y: number; w: number; h: number } | null;
+  altDoubleArrow: { x: number; y: number; w: number; h: number } | null;
+  tab: { x: number; y: number; w: number; h: number } | null;
+}
+
+function getNodeHitBoxes(
+  node: LayoutNode,
+  tx: Transform
+): NodeHitBoxes {
+  const s = canvasToScreen(tx, node.x, node.y);
+  const sw = NODE_W * tx.k;
+  const sh = node.height * tx.k;
+
+  const expandY = s.y + sh / 2 - 14 * tx.k;
+
+  return {
+    expandTriangle: {
+      x: s.x + sw - 48 * tx.k,
+      y: expandY,
+      w: 32 * tx.k,
+      h: 28 * tx.k,
+    },
+    altDoubleArrow: {
+      x: s.x + 16 * tx.k,
+      y: s.y + (sh - 28) * tx.k,
+      w: 28 * tx.k,
+      h: 16 * tx.k,
+    },
+    tab: {
+      x: s.x,
+      y: s.y + (sh - 10) * tx.k,
+      w: sw,
+      h: 10 * tx.k,
+    },
+  };
+}
+
+function isPointInCircle(px: number, py: number, cx: number, cy: number, r: number): boolean {
+  return (px - cx) ** 2 + (py - cy) ** 2 <= r ** 2;
+}
+
+function isPointInRect(px: number, py: number, rx: number, ry: number, rw: number, rh: number): boolean {
+  return px >= rx && px <= rx + rw && py >= ry && py <= ry + rh;
+}
+
+// ─── Canvas node renderer ────────────────────────────────────────────────────
+
 function drawNode(
   ctx: CanvasRenderingContext2D,
   node: LayoutNode,
   isSelected: boolean,
   isHovered: boolean,
   isTreeEx: boolean,
+  isCardEx: boolean,
   borderColor: string,
   bgColor: string,
   dotColor: string
@@ -357,7 +419,7 @@ function drawNode(
   const w = NODE_W;
   const h = node.height;
 
-  // Background
+  // ── Background ──
   ctx.fillStyle = bgColor;
   ctx.beginPath();
   ctx.moveTo(x + r, y);
@@ -372,69 +434,175 @@ function drawNode(
   ctx.closePath();
   ctx.fill();
 
-  // Border
+  // ── Border ──
   ctx.strokeStyle = borderColor;
   ctx.lineWidth = isSelected || isHovered ? 1.5 : 1;
   ctx.stroke();
 
-  // Type dot
+  // ── Type dot ──
   ctx.fillStyle = dotColor;
   ctx.beginPath();
   ctx.arc(x + 14, y + 18, 3, 0, Math.PI * 2);
   ctx.fill();
 
-  // Label (truncated)
-  ctx.fillStyle = isSelected || isHovered ? "#ffffff" : "rgba(255,255,255,0.85)";
-  ctx.font = `${isSelected || isHovered ? "500" : "400"} 13px Inter, sans-serif`;
+  // ── Top bar: Name + qty ──
+  const topY = y + 16;
+  const topH = 28;
+
+  // Name background box
+  const nameW = 180;
+  const nameX = x + 16;
+  const nameY = topY;
+  ctx.fillStyle = hexToRgba(dotColor, 0.08);
+  ctx.beginPath();
+  ctx.roundRect(nameX, nameY, nameW, topH, 4);
+  ctx.fill();
+
+  // Name text (truncated)
+  ctx.fillStyle = isSelected || isHovered ? dotColor : "rgba(255,255,255,0.85)";
+  ctx.font = `500 12px Inter, sans-serif`;
   const label = node.label;
-  const maxW = w - 60;
+  const maxNameW = nameW - 12;
   let displayLabel = label;
-  if (ctx.measureText(label).width > maxW) {
-    while (ctx.measureText(displayLabel + "…").width > maxW && displayLabel.length > 0) {
+  if (ctx.measureText(label).width > maxNameW) {
+    while (ctx.measureText(displayLabel + "…").width > maxNameW && displayLabel.length > 0) {
       displayLabel = displayLabel.slice(0, -1);
     }
     displayLabel += "…";
   }
-  ctx.fillText(displayLabel, x + 20, y + 26);
+  ctx.fillText(displayLabel, nameX + 8, nameY + 18);
 
-  // Meta badge
+  // "×" separator
+  ctx.fillStyle = "rgba(255,255,255,0.5)";
+  ctx.font = `400 14px sans-serif`;
+  ctx.fillText("×", nameX + nameW + 8, topY + 18);
+
+  // Qty badge
+  const qtyStr = String(node.qty ?? 1);
+  const qtyW = ctx.measureText(qtyStr).width + 14;
+  const qtyX = nameX + nameW + 22;
+  const qtyY = topY;
+  ctx.fillStyle = hexToRgba(dotColor, 0.12);
+  ctx.beginPath();
+  ctx.roundRect(qtyX, qtyY, qtyW, topH, 4);
+  ctx.fill();
+  ctx.fillStyle = dotColor;
+  ctx.font = `600 11px "JetBrains Mono", monospace`;
+  ctx.fillText(qtyStr, qtyX + 6, qtyY + 18);
+
+  // ── Middle-right: expand/collapse triangle (▶ / ▸) ──
+  if (node.children?.length) {
+    const triCx = x + w - 28;
+    const triCy = y + h / 2;
+    const triSize = 14;
+
+    // Triangle background circle
+    ctx.fillStyle = hexToRgba(dotColor, 0.08);
+    ctx.beginPath();
+    ctx.arc(triCx, triCy, triSize + 2, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Triangle border
+    ctx.strokeStyle = hexToRgba(dotColor, 0.18);
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    ctx.arc(triCx, triCy, triSize + 2, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Triangle icon (play / expand)
+    ctx.fillStyle = dotColor;
+    ctx.beginPath();
+    ctx.moveTo(triCx - 4, triCy - 7);
+    ctx.lineTo(triCx - 4, triCy + 7);
+    ctx.lineTo(triCx + 6, triCy);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // ── Bottom info bar ──
+  const infoY = y + h - 28;
+
+  // ── Show alternatives button (double-arrow symbol ⇅) ──
+  const altBtnW = 28;
+  const altBtnH = 16;
+  const altBtnX = x + 16;
+  const altBtnY = infoY;
+
+  // Button background
+  ctx.fillStyle = hexToRgba(dotColor, 0.12);
+  ctx.beginPath();
+  ctx.roundRect(altBtnX, altBtnY, altBtnW, altBtnH, 4);
+  ctx.fill();
+
+  // Button border
+  ctx.strokeStyle = hexToRgba(dotColor, 0.2);
+  ctx.lineWidth = 0.5;
+  ctx.beginPath();
+  ctx.roundRect(altBtnX, altBtnY, altBtnW, altBtnH, 4);
+  ctx.stroke();
+
+  // Double-arrow symbol (two arrows facing different directions on top of each other)
+  ctx.fillStyle = dotColor;
+  ctx.font = `bold 11px sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("⇅", altBtnX + altBtnW / 2, altBtnY + altBtnH / 2);
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+
+  // ── Crafting method badge ──
   if (node.meta) {
     const badgeText = node.meta;
     const badgeW = ctx.measureText(badgeText).width + 10;
     const badgeH = 16;
-    const badgeX = x + 16;
-    const badgeY = y + 38;
+    const badgeX = altBtnX + altBtnW + 6;
+    const badgeY = infoY + 1;
 
-    ctx.fillStyle = TYPE_CONFIG[node.type]?.badge || "rgba(255,255,255,0.1)";
+    ctx.fillStyle = hexToRgba(dotColor, 0.12);
     ctx.beginPath();
     ctx.roundRect(badgeX, badgeY, badgeW, badgeH, 3);
     ctx.fill();
 
-    ctx.fillStyle = TYPE_CONFIG[node.type]?.text || "#ffffff";
-    ctx.font = `500 10px "JetBrains Mono", monospace`;
+    ctx.fillStyle = dotColor;
+    ctx.font = `500 9px "JetBrains Mono", monospace`;
     ctx.fillText(badgeText, badgeX + 5, badgeY + 12);
   }
 
-  // Children count
+  // ── Children count (right-aligned on same line) ──
   if (node.children?.length) {
+    const childText = `${node.children.length} children`;
+    const childW = ctx.measureText(childText).width;
+    const childX = x + w - 16 - childW;
+    const childY = infoY + 1;
+
     ctx.fillStyle = "rgba(255,255,255,0.35)";
-    ctx.font = `400 10px "JetBrains Mono", monospace`;
-    ctx.fillText(`${node.children.length} children`, x + 16, y + 60);
+    ctx.font = `400 9px "JetBrains Mono", monospace`;
+    ctx.fillText(childText, childX, childY + 11);
   }
 
-  // Expand/collapse indicator
-  if (node.children?.length) {
-    const cx = x + w - 28;
-    const cy = y + 18;
-    ctx.fillStyle = isTreeEx ? dotColor : "rgba(255,255,255,0.28)";
-    ctx.font = `bold 11px sans-serif`;
-    ctx.fillText(isTreeEx ? "▸" : "▹", cx, cy + 4);
-  }
+  // ── Colored tab at bottom ──
+  const tabH = 10;
+  const tabY = y + h - tabH;
 
-  // Collapse indicator at bottom
-  ctx.fillStyle = "rgba(255,255,255,0.2)";
-  ctx.font = `400 10px sans-serif`;
-  ctx.fillText("∨", x + w - 18, y + h - 6);
+  ctx.fillStyle = hexToRgba(dotColor, 0.15);
+  ctx.beginPath();
+  ctx.rect(x, tabY, w, tabH);
+  ctx.fill();
+
+  // ── Center chevron down in tab (show image) ──
+  const chevCx = x + w / 2;
+  const chevCy = y + h - tabH / 2;
+  const chevSize = 5;
+
+  ctx.strokeStyle = dotColor;
+  ctx.lineWidth = 1.5;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.beginPath();
+  ctx.moveTo(chevCx - chevSize, chevCy - chevSize / 2);
+  ctx.lineTo(chevCx, chevCy + chevSize / 2);
+  ctx.lineTo(chevCx + chevSize, chevCy - chevSize / 2);
+  ctx.stroke();
 }
 
 // ─── Main component ───────────────────────────────────────────────────────────
@@ -723,6 +891,7 @@ export default function App() {
         isSelected,
         isHovered,
         isTreeEx,
+        cardExpanded.has(node.id),
         borderColor,
         bgColor,
         cfg.dot
@@ -793,6 +962,82 @@ export default function App() {
       setTransform({ ...pendingTransform.current });
     }
   }, []);
+
+  // ── Canvas click handler ──────────────────────────────────────────────────
+  const onCanvasClick = useCallback(
+    (e: React.MouseEvent) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+
+      // Check each visible node for interactive element hits
+      for (const node of visibleNodes) {
+        const boxes = getNodeHitBoxes(node, transform);
+
+        // Expand triangle hit → toggle tree expand
+        if (
+          boxes.expandTriangle &&
+          isPointInRect(mx, my, boxes.expandTriangle.x, boxes.expandTriangle.y, boxes.expandTriangle.w, boxes.expandTriangle.h)
+        ) {
+          setTreeExpanded((prev) => {
+            const next = new Set(prev);
+            if (next.has(node.id)) next.delete(node.id);
+            else next.add(node.id);
+            return next;
+          });
+          return;
+        }
+
+        // Show alternatives double-arrow hit → show alternatives panel
+        if (
+          boxes.altDoubleArrow &&
+          isPointInRect(mx, my, boxes.altDoubleArrow.x, boxes.altDoubleArrow.y, boxes.altDoubleArrow.w, boxes.altDoubleArrow.h)
+        ) {
+          const realItemId = node.itemId ?? node.id;
+          const options = getAlternatives(realItemId, loadedRecipes);
+          if (options.length > 0) {
+            setAltPanel({
+              nodeId: node.id,
+              realItemId,
+              x: node.x,
+              y: node.y + node.height - 40,
+              options,
+            });
+          }
+          return;
+        }
+
+        // Tab hit → toggle card expand (show image)
+        if (
+          boxes.tab &&
+          isPointInRect(mx, my, boxes.tab.x, boxes.tab.y, boxes.tab.w, boxes.tab.h)
+        ) {
+          setCardExpanded((prev) => {
+            const next = new Set(prev);
+            if (next.has(node.id)) next.delete(node.id);
+            else next.add(node.id);
+            return next;
+          });
+          return;
+        }
+
+        // Node body hit → select
+        const s = canvasToScreen(transform, node.x, node.y);
+        const sw = NODE_W * transform.k;
+        const sh = node.height * transform.k;
+        if (mx >= s.x && mx <= s.x + sw && my >= s.y && my <= s.y + sh) {
+          setSelected(node.id);
+          return;
+        }
+      }
+
+      // Clicked on empty canvas → deselect
+      setSelected(null);
+    },
+    [visibleNodes, transform, loadedRecipes]
+  );
 
   function collectDescendantItemIds(
     node: TreeNode,
@@ -1134,6 +1379,7 @@ export default function App() {
                 ref={canvasRef}
                 className="absolute inset-0 w-full h-full"
                 style={{ touchAction: "none" }}
+                onClick={onCanvasClick}
               />
 
               {/* HTML overlay for hovered/selected node with image */}
