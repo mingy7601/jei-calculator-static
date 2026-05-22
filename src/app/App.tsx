@@ -642,6 +642,7 @@ export default function App() {
   const [passivedList, setPassivedList] = useState<string[]>([]);
   const [showPassivedPanel, setShowPassivedPanel] = useState(false);
 
+
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -758,6 +759,12 @@ export default function App() {
     [treeRoot, treeExpanded, cardExpanded]
   );
   const byId = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
+  const nodesRef = useRef(nodes);
+  useLayoutEffect(() => {
+    nodesRef.current = nodes;
+  }, [nodes]);
+
+
 
   // ── Viewport culling ───────────────────────────────────────────────────────
   const visibleNodes = useMemo(() => {
@@ -1005,21 +1012,42 @@ export default function App() {
 
   // ── Rebuild tree with a given passived set ─────────────────────────────
   const rebuildTreeWithPassived = useCallback(
-    async (newPassived: Set<string>) => {
+    async (newPassived: Set<string>, centerItemId?: string) => {
       const q = searchQuery.trim();
       if (!q) return;
       setIsLoading(true);
       try {
         const { displayTree, rawTree, recipes } = await loadTree(q, overrides, newPassived);
         const unique = assignUniqueIds(displayTree);
+        const allExpanded = collectAllIds(unique);
         setTreeRoot(unique);
-        setTreeExpanded(collectAllIds(unique));
+        setTreeExpanded(allExpanded);
         setCardExpanded(new Set());
-        setSelected(null);
         setActiveLeafItemId(null);
-        setTransform({ x: 48, y: 56, k: 1 });
         setLoadedRecipes(recipes);
         setItems(sumLeafIngredients(rawTree));
+
+        // Compute layout synchronously so we can center before any render
+        if (centerItemId) {
+          const layout = buildLayout(unique, 0, 0, allExpanded, new Set());
+          const target = layout.find((n) => (n.itemId ?? n.id) === centerItemId);
+          if (target) {
+            const vw = containerRef.current?.clientWidth || window.innerWidth;
+            const vh = containerRef.current?.clientHeight || window.innerHeight;
+            setTransform({
+              x: vw / 2 - target.x - NODE_W / 2,
+              y: vh / 2 - target.y - target.height / 2,
+              k: pendingTransform.current.k,
+            });
+            setSelected(target.id);
+          } else {
+            setTransform({ x: 48, y: 56, k: 1 });
+            setSelected(null);
+          }
+        } else {
+          setTransform({ x: 48, y: 56, k: 1 });
+          setSelected(null);
+        }
       } catch (err) {
         toast.error(err instanceof Error ? err.message : "Failed to reload tree");
       } finally {
@@ -1053,14 +1081,14 @@ export default function App() {
             savePassivedList(next);
             setPassivedSet(new Set(next));
             toast.success(`"${realItemId}" removed from passived — children shown`);
-            rebuildTreeWithPassived(new Set(next));
+            rebuildTreeWithPassived(new Set(next), realItemId);
           } else {
             const next = [...passivedList, realItemId];
             setPassivedList(next);
             savePassivedList(next);
             setPassivedSet(new Set(next));
             toast.success(`"${realItemId}" added to passived — children hidden`);
-            rebuildTreeWithPassived(new Set(next));
+            rebuildTreeWithPassived(new Set(next), realItemId);
           }
           return;
         }
@@ -1725,7 +1753,7 @@ export default function App() {
                             savePassivedList(next);
                             setPassivedSet(new Set(next));
                             toast.success(`"${item}" removed from passived — children shown`);
-                            rebuildTreeWithPassived(new Set(next));
+                            rebuildTreeWithPassived(new Set(next), item);
                           }}
                           className="text-xs text-muted-foreground hover:text-red-400 transition-colors shrink-0"
                           title="Remove"
