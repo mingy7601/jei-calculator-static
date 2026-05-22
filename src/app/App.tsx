@@ -194,7 +194,7 @@ function countAll(node: TreeNode): number {
 
 // ─── Convert raw TreeNode → display TreeNode ──────────────────────────────────
 
-const MAX_STEPS = 5;
+const MAX_STEPS = 10;
 function rawToDisplay(node: RawTreeNode, isRoot = false): TreeNode {
   const itemId = node.item ?? "unknown";
   const source = node.source;
@@ -490,7 +490,7 @@ function drawNode(
     const badgeW = ctx.measureText(badgeText).width + 10;
     const badgeH = 16;
     const badgeX = altBtnX + altBtnW + 6;
-    const badgeY = altBtnY + 1;
+    const badgeY = altBtnY;
 
     ctx.fillStyle = hexToRgba(dotColor, 0.12);
     ctx.beginPath();
@@ -498,8 +498,8 @@ function drawNode(
     ctx.fill();
 
     ctx.fillStyle = dotColor;
-    ctx.font = "500 9px 'JetBrains Mono', monospace";
-    ctx.fillText(badgeText, badgeX + 5, badgeY + 12);
+    ctx.font = "500 11x 'JetBrains Mono', monospace";
+    ctx.fillText(badgeText, badgeX + 4, badgeY + 12);
   }
 
   // ── Children count ──
@@ -607,6 +607,9 @@ export default function App() {
   const [selected, setSelected] = useState<string | null>(null);
 
   const [leafGroups, setLeafGroups] = useState<Record<string, LeafGroup>>({});
+
+  // Track which sidebar item is currently "active" (showing which instance)
+  const [activeLeafItemId, setActiveLeafItemId] = useState<string | null>(null);
 
   // Highlight search
   const [highlightSearch, setHighlightSearch] = useState("");
@@ -891,6 +894,7 @@ export default function App() {
       setTreeExpanded(collectAllIds(unique));
       setCardExpanded(new Set());
       setSelected(null);
+      setActiveLeafItemId(null);
       setTransform({ x: 48, y: 56, k: 1 });
       setLoadedRecipes(recipes);
       setItems(sumLeafIngredients(rawTree));
@@ -1186,6 +1190,8 @@ export default function App() {
           y: (containerRef.current?.clientHeight || window.innerHeight) / 2 - target.y,
           k: transform.k,
         });
+        setSelected(target.id);
+        setActiveLeafItemId(null);
         return;
       }
 
@@ -1208,6 +1214,8 @@ export default function App() {
           y: (containerRef.current?.clientHeight || window.innerHeight) / 2 - matches[0].y,
           k: transform.k,
         });
+        setSelected(matches[0].id);
+        setActiveLeafItemId(null);
       }
     },
     [nodes, highlightMatchList, highlightIdx, transform]
@@ -1218,6 +1226,7 @@ export default function App() {
     setHighlightedIds(new Set());
     setHighlightMatchList([]);
     setHighlightIdx(-1);
+    setActiveLeafItemId(null);
   }, []);
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -1498,31 +1507,46 @@ export default function App() {
               <div className="space-y-px">
                 {Object.entries(items)
                   .sort(([, a], [, b]) => b.qty - a.qty)
-                  .map(([key, item]) => (
-                    <div
-                      key={key}
-                      className="flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer hover:bg-white/[0.04] transition-colors"
-                    >
-                      <span
-                        className="text-[11px] text-foreground truncate flex-1 min-w-0"
-                        title={item.name}
-                      >
-                        {item.name}
-                      </span>
-                      <span
-                        className="text-[10px] tabular-nums"
-                        style={{
-                          color: "#94a3b8",
-                          fontFamily:
-                            "'JetBrains Mono', monospace",
+                  .map(([key, item]) => {
+                    const isActive = activeLeafItemId === key;
+                    const group = leafGroupsMerged[key];
+                    const instanceLabel = group && group.leaves.length > 1
+                      ? ` (${group.selectedIndex + 1}/${group.leaves.length})`
+                      : "";
+                    return (
+                      <div
+                        key={key}
+                        onClick={() => {
+                          handleLeafClick(key);
+                          setActiveLeafItemId(key);
                         }}
+                        className={`flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer transition-colors ${
+                          isActive
+                            ? "bg-cyan-500/10 border border-cyan-500/20"
+                            : "hover:bg-white/[0.04]"
+                        }`}
                       >
-                        {item.qty % 1 === 0
-                          ? item.qty.toFixed(0)
-                          : item.qty.toFixed(1)}
-                      </span>
-                    </div>
-                  ))}
+                        <span
+                          className="text-[11px] text-foreground truncate flex-1 min-w-0"
+                          title={item.name}
+                        >
+                          {item.name}
+                        </span>
+                        <span
+                          className="text-[10px] tabular-nums shrink-0"
+                          style={{
+                            color: isActive ? "#22d3ee" : "#94a3b8",
+                            fontFamily: "'JetBrains Mono', monospace",
+                          }}
+                        >
+                          {item.qty % 1 === 0
+                            ? item.qty.toFixed(0)
+                            : item.qty.toFixed(1)}
+                          {instanceLabel}
+                        </span>
+                      </div>
+                    );
+                  })}
               </div>
             )}
           </div>
