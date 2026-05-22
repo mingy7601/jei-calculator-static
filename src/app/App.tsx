@@ -225,7 +225,7 @@ function rawToDisplay(node: RawTreeNode, isRoot = false): TreeNode {
   const qtyStr = Number.isInteger(qty) ? String(qty) : qty.toFixed(1);
   const displayLabel = `${label} x ${qtyStr}`;
 
-  const meta = nodeType === "emc" ? "emc" : (node.category_name ?? "N/A");
+  const meta = nodeType === "emc" ? "emc" : (nodeType === "passived" ? "passived" : (node.category_name ?? "N/A"));
   const imageUrl = node.image_path ? `/static/${node.image_path}` : undefined;
 
   const result: TreeNode = {
@@ -735,7 +735,11 @@ export default function App() {
     (async () => {
       try {
         await getManifest();
-        const { displayTree, rawTree, recipes } = await loadTree(item, savedOverrides, passivedSet);
+        // Load passived list before building the tree so it's available
+        const passived = await getPassivedList();
+        setPassivedSet(passived);
+        setPassivedList(Array.from(passived));
+        const { displayTree, rawTree, recipes } = await loadTree(item, savedOverrides, passived);
         const unique = assignUniqueIds(displayTree);
         setTreeRoot(unique);
         setTreeExpanded(collectAllIds(unique));
@@ -748,15 +752,6 @@ export default function App() {
       }
     })();
   }, [saved]);
-
-  // ── Load passived list on mount ────────────────────────────────────────
-  useEffect(() => {
-    (async () => {
-      const set = await getPassivedList();
-      setPassivedSet(set);
-      setPassivedList(Array.from(set));
-    })();
-  }, []);
 
   const nodes = useMemo(
     () => (treeRoot ? buildLayout(treeRoot, 0, 0, treeExpanded, cardExpanded) : []),
@@ -908,12 +903,16 @@ export default function App() {
       const cfg = TYPE_CONFIG[node.type];
       let borderColor: string;
       let bgColor: string;
+      const isPassived = node.type === "passived";
       if (isSelected) {
         borderColor = NODE_BORDER_SEL;
         bgColor = "rgba(34,211,238,0.045)";
       } else if (isHovered) {
         borderColor = NODE_BORDER_HL;
         bgColor = "rgba(34,211,238,0.08)";
+      } else if (isPassived) {
+        borderColor = "rgba(250,204,21,0.55)";
+        bgColor = "var(--card)";
       } else {
         borderColor = NODE_BORDER;
         bgColor = "var(--card)";
@@ -1003,6 +1002,72 @@ export default function App() {
       setTransform(final);
     }
   }, []);
+
+  // ── Rebuild tree with a given passived set ─────────────────────────────
+  const rebuildTreeWithPassived = useCallback(
+    async (newPassived: Set<string>) => {
+      const q = searchQuery.trim();
+      if (!q) return;
+      setIsLoading(true);
+      try {
+        const { displayTree, rawTree, recipes } = await loadTree(q, overrides, newPassived);
+        const unique = assignUniqueIds(displayTree);
+        setTreeRoot(unique);
+        setTreeExpanded(collectAllIds(unique));
+        setCardExpanded(new Set());
+        setSelected(null);
+        setActiveLeafItemId(null);
+        setTransform({ x: 48, y: 56, k: 1 });
+        setLoadedRecipes(recipes);
+        setItems(sumLeafIngredients(rawTree));
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Failed to reload tree");
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [searchQuery, overrides]
+  );
+
+  // ── Right-click → toggle node in passived ─────────────────────────────
+  const onCanvasContextMenu = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+
+      // Find which node was right-clicked
+      for (const node of visibleNodes) {
+        const s = canvasToScreen(transform, node.x, node.y);
+        const sw = NODE_W * transform.k;
+        const sh = node.height * transform.k;
+        if (mx >= s.x && mx <= s.x + sw && my >= s.y && my <= s.y + sh) {
+          const realItemId = node.itemId ?? node.id;
+          const isInPassived = passivedList.includes(realItemId);
+          if (isInPassived) {
+            const next = passivedList.filter((id) => id !== realItemId);
+            setPassivedList(next);
+            savePassivedList(next);
+            setPassivedSet(new Set(next));
+            toast.success(`"${realItemId}" removed from passived — children shown`);
+            rebuildTreeWithPassived(new Set(next));
+          } else {
+            const next = [...passivedList, realItemId];
+            setPassivedList(next);
+            savePassivedList(next);
+            setPassivedSet(new Set(next));
+            toast.success(`"${realItemId}" added to passived — children hidden`);
+            rebuildTreeWithPassived(new Set(next));
+          }
+          return;
+        }
+      }
+    },
+    [visibleNodes, transform, passivedList, rebuildTreeWithPassived]
+  );
 
   // ── Canvas click handler ──────────────────────────────────────────────────
   const onCanvasClick = useCallback(
@@ -1481,6 +1546,7 @@ export default function App() {
               onMouseMove={onMouseMove}
               onMouseUp={onMouseUp}
               onMouseLeave={onMouseUp}
+              onContextMenu={onCanvasContextMenu}
             >
               <canvas
                 ref={canvasRef}
@@ -1615,7 +1681,8 @@ export default function App() {
                           savePassivedList(next);
                           setPassivedSet(new Set(next));
                           input.value = "";
-                          toast.success(`"${val}" added to passived — reload tree to apply`);
+                          toast.success(`"${val}" added to passived — children hidden`);
+                          rebuildTreeWithPassived(new Set(next));
                         }
                       }
                     }}
@@ -1630,7 +1697,8 @@ export default function App() {
                         savePassivedList(next);
                         setPassivedSet(new Set(next));
                         input.value = "";
-                        toast.success(`"${val}" added to passived — reload tree to apply`);
+                        toast.success(`"${val}" added to passived — children hidden`);
+                        rebuildTreeWithPassived(new Set(next));
                       }
                     }}
                     className="h-7 px-3 text-[11px] rounded border border-yellow-400/30 text-yellow-400 hover:bg-yellow-400/10 transition-colors"
@@ -1656,7 +1724,8 @@ export default function App() {
                             setPassivedList(next);
                             savePassivedList(next);
                             setPassivedSet(new Set(next));
-                            toast.info(`"${item}" removed from passived — reload tree to apply`);
+                            toast.success(`"${item}" removed from passived — children shown`);
+                            rebuildTreeWithPassived(new Set(next));
                           }}
                           className="text-xs text-muted-foreground hover:text-red-400 transition-colors shrink-0"
                           title="Remove"

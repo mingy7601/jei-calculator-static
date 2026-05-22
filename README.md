@@ -36,3 +36,10 @@
 - [x] Handle recursive recipes
 - [ ] Make alternatives button disapear on mouse click
 - [ ] Move alternatives button
+
+### RECIPE FILTERING
+- [ ] Remove runic altar from runic altar recipes
+- [ ] Thaumotorium automation
+- [ ] Resource miners
+- [ ] Master of spellcraft
+- [ ] 
