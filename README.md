@@ -8,12 +8,12 @@
 - [ ] Handle ore dictionary
 - [x] Multiply ingredient nodes to produce output
 - [x] Create sidebar for to aggregate materials
-- [ ] Get machine rates, such as speed and energy costs
+- [x] Get machine rates, such as speed and energy costs
 - [x] Read tooltip for emc
 - [x] Tree search bar and focus
 - [x] Clicking the item in the sidebar will highlight the nodes associated with it
 - [x] Enable rebuilding of the tree by selecting alternative routes
-- [ ] Enable the marking of nodes as "Passive", which will stop further nodes from propagating
+- [x] Enable the marking of nodes as "Passive", which will stop further nodes from propagating
 - [ ] Cache generated trees
 - [ ] Cache search bar helper
 - [x] ~~Cache loaded recipe file~~ Lazy load recipes based on category
@@ -34,15 +34,20 @@
 - [ ] Add quantity for root item
 - [ ] Extract reusable from tooltip
 - [x] Handle recursive recipes
-- [ ] Make alternatives button disapear on mouse click
-- [ ] Move alternatives button
+- [ ] Make alternatives panel disapear on mouse click
+- [ ] Remove alternatives button for leaf + passive nodes
+- [ ] Limit tree by total node count, not depth
+- [ ] Items in passived should be able to be expanded if it is the root
+- [ ] Redo passived tab
 
 ### RECIPE FILTERING
-- [ ] Remove runic altar from runic altar recipes
-- [ ] Thaumotorium automation
+- [x] Remove runic altar from runic altar recipes
+- [x] Thaumotorium automation
 - [ ] Resource miners
 - [ ] Master of spellcraft
-- [ ] HNN
-- [ ] living recursive essence
-- [ ] biome item
-- [ ] sacred cinders remove inputs
+- [x] HNN
+- [x] living recursive essence
+- [x] biome item
+- [x] remove EIO power
+- [x] Terminate all essentia by removing inputs from mechanized essentia smeltery
+- [ ] Fix essentia quantity

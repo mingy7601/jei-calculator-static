@@ -1,5 +1,5 @@
 /**
- * App.tsx — canvas-rendered version
+ * App.tsx — canvas-rendered node viewer
  *
  * Performance architecture:
  *   1. Canvas layer — all edges + node rectangles drawn on a single <canvas>
@@ -11,137 +11,18 @@
  *   5. Lazy tree loading — only build visible subtree initially, expand on demand
  */
 
-import {
-  useState,
-  useEffect,
-  useRef,
-  useCallback,
-  useMemo,
-  useLayoutEffect,
-} from "react";
+import { useEffect, useRef, useCallback, useMemo, useLayoutEffect } from "react";
+import { useAppState } from "./hooks";
 import { Search, Loader2 } from "lucide-react";
 import { Toaster, toast } from "sonner";
 
-import {
-  getManifest,
-  getEmcMap,
-  getRecipes,
-  preWarmShards,
-  resolveItemId,
-  getLoadedRecipes,
-  getPassivedList,
-  savePassivedList,
-  loadPassivedList,
-  type RecipeMap,
-  type EmcMap,
-} from "./data";
+import { getManifest, getEmcMap, getRecipes, preWarmShards, resolveItemId, getLoadedRecipes, getPassivedList, savePassivedList, type RecipeMap, type EmcMap } from "./data";
 import { buildTree, wouldCycle, collectItemIds, type TreeNode as RawTreeNode } from "./tree";
 import { sumLeafIngredients } from "./ingredients";
 import { loadState, saveState, clearState } from "./state-persist";
-
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-type NodeType = "root" | "service" | "module" | "component" | "resource" | "emc" | "passived";
-
-interface TreeNode {
-  id: string;
-  itemId?: string;
-  label: string;
-  type: NodeType;
-  meta?: string;
-  imageUrl?: string;
-  qty?: number;
-  children?: TreeNode[];
-}
-
-interface LeafGroup {
-  itemId: string;
-  leaves: LayoutNode[];
-  selectedIndex: number;
-}
-
-interface AltOption {
-  recipe_id: number;
-  category_name: string;
-  image_url: string;
-  inputs: { name: string; qty: number }[];
-  outputs: { id: string; name: string; qty: number }[];
-}
-
-type ItemsData = Record<string, { name: string; qty: number }>;
-
-// ─── Layout engine ─────────────────────────────────────────────────────────────
-
-const NODE_W = 300;
-const NODE_H_BASE = 80;
-const NODE_H_IMAGE = 152;
-const COL_GAP = 76;
-const ROW_GAP = 12;
-
-function cardH(id: string, cardExpanded: Set<string>): number {
-  return cardExpanded.has(id) ? NODE_H_BASE + NODE_H_IMAGE : NODE_H_BASE;
-}
-
-interface LayoutNode extends TreeNode {
-  x: number;
-  y: number;
-  height: number;
-}
-
-function subtreeH(node: TreeNode, treeEx: Set<string>, cardEx: Set<string>): number {
-  const myH = cardH(node.id, cardEx);
-  if (!node.children?.length || !treeEx.has(node.id)) return myH;
-  const ch = node.children;
-  const childTotal =
-    ch.reduce((s, c) => s + subtreeH(c, treeEx, cardEx), 0) + (ch.length - 1) * ROW_GAP;
-  return Math.max(myH, childTotal);
-}
-
-function buildLayout(
-  node: TreeNode,
-  depth: number,
-  yTop: number,
-  treeEx: Set<string>,
-  cardEx: Set<string>,
-  out: LayoutNode[] = []
-): LayoutNode[] {
-  const myH = cardH(node.id, cardEx);
-  const totalH = subtreeH(node, treeEx, cardEx);
-  const x = depth * (NODE_W + COL_GAP);
-  const y = yTop + (totalH - myH) / 2;
-  out.push({ ...node, x, y, height: myH });
-
-  if (node.children && treeEx.has(node.id)) {
-    let cy = yTop;
-    for (const child of node.children) {
-      buildLayout(child, depth + 1, cy, treeEx, cardEx, out);
-      cy += subtreeH(child, treeEx, cardEx) + ROW_GAP;
-    }
-  }
-  return out;
-}
-
-// ─── Transform helpers (pan + zoom) ──────────────────────────────────────────
-
-interface Transform {
-  x: number;
-  y: number;
-  k: number; // zoom scale
-}
-
-function screenToCanvas(tx: Transform, sx: number, sy: number): { x: number; y: number } {
-  return {
-    x: (sx - tx.x) / tx.k,
-    y: (sy - tx.y) / tx.k,
-  };
-}
-
-function canvasToScreen(tx: Transform, cx: number, cy: number): { x: number; y: number } {
-  return {
-    x: cx * tx.k + tx.x,
-    y: cy * tx.k + tx.y,
-  };
-}
+import type { NodeType, TreeNode, LayoutNode, LeafGroup, AltOption, ItemsData, Transform, NodeHitBoxes, Edge } from "./types";
+import { buildLayout, NODE_W, NODE_H_BASE, NODE_H_IMAGE, COL_GAP, ROW_GAP, cardH, subtreeH } from "./layout";
+import { CANVAS_BG, CANVAS_GRID, CANVAS_EDGE, CANDS_EDGE_HL, CANVAS_EDGE_SEL, NODE_BORDER, NODE_BORDER_SEL, NODE_BORDER_HL, NODE_RADIUS, screenToCanvas, canvasToScreen, drawGrid, drawEdge, hexToRgba, getNodeHitBoxes, isPointInCircle, isPointInRect, drawNode } from "./canvas-utils";
 
 // ─── Visual tokens ─────────────────────────────────────────────────────────────
 
@@ -154,17 +35,6 @@ const TYPE_CONFIG: Record<NodeType, { dot: string; badge: string; text: string; 
   emc:       { dot: "#a855f7", badge: "rgba(168,85,247,0.12)",  text: "#a855f7", label: "EMC",          bg: "rgba(168,85,247,0.06)" },
   passived:  { dot: "#facc15", badge: "rgba(250,204,21,0.12)",  text: "#facc15", label: "Passived",     bg: "rgba(250,204,21,0.06)" },
 };
-
-// Canvas color tokens (dark theme)
-const CANVAS_BG = "#0d0d14";
-const CANVAS_GRID = "rgba(255,255,255,0.035)";
-const CANVAS_EDGE = "rgba(255,255,255,0.085)";
-const CANDS_EDGE_HL = "rgba(34,211,238,0.55)";
-const CANVAS_EDGE_SEL = "#22d3ee";
-const NODE_BORDER = "rgba(255,255,255,0.07)";
-const NODE_BORDER_SEL = "rgba(34,211,238,0.42)";
-const NODE_BORDER_HL = "#22d3ee";
-const NODE_RADIUS = 10;
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -292,362 +162,40 @@ function getAlternatives(itemId: string, recipes: RecipeMap): AltOption[] {
     }));
 }
 
-// ─── Canvas renderer ──────────────────────────────────────────────────────────
-
-interface CanvasRenderer {
-  canvas: HTMLCanvasElement;
-  ctx: CanvasRenderingContext2D;
-  width: number;
-  height: number;
-  dpr: number;
-}
-
-function initCanvas(canvas: HTMLCanvasElement): CanvasRenderer {
-  const dpr = window.devicePixelRatio || 1;
-  const rect = canvas.getBoundingClientRect();
-  canvas.width = rect.width * dpr;
-  canvas.height = rect.height * dpr;
-  const ctx = canvas.getContext("2d")!;
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  return { canvas, ctx, width: rect.width, height: rect.height, dpr };
-}
-
-function drawGrid(ctx: CanvasRenderingContext2D, w: number, h: number, tx: Transform) {
-  const gridSize = 28 * tx.k;
-  const offsetX = tx.x % gridSize;
-  const offsetY = tx.y % gridSize;
-
-  ctx.fillStyle = CANVAS_GRID;
-  for (let x = offsetX; x < w; x += gridSize) {
-    for (let y = offsetY; y < h; y += gridSize) {
-      ctx.beginPath();
-      ctx.arc(x, y, 1, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
-}
-
-function drawEdge(
-  ctx: CanvasRenderingContext2D,
-  x1: number, y1: number,
-  x2: number, y2: number,
-  isHl: boolean,
-  isSel: boolean
-) {
-  const mx = (x1 + x2) / 2;
-  ctx.beginPath();
-  ctx.moveTo(x1, y1);
-  ctx.bezierCurveTo(mx, y1, mx, y2, x2, y2);
-
-  if (isSel) {
-    ctx.strokeStyle = CANVAS_EDGE_SEL;
-    ctx.lineWidth = 2;
-  } else if (isHl) {
-    ctx.strokeStyle = CANDS_EDGE_HL;
-    ctx.lineWidth = 1.5;
-  } else {
-    ctx.strokeStyle = CANVAS_EDGE;
-    ctx.lineWidth = 1;
-  }
-  ctx.stroke();
-}
-
-// ─── Hex → rgba helper ───────────────────────────────────────────────────────
-
-function hexToRgba(hex: string, alpha: number): string {
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  return `rgba(${r},${g},${b},${alpha})`;
-}
-
-// ─── Interactive element hit-boxes for a node ────────────────────────────────
-
-interface NodeHitBoxes {
-  expandTriangle: { x: number; y: number; w: number; h: number } | null;
-  altDoubleArrow: { x: number; y: number; w: number; h: number } | null;
-  toggleStrip: { x: number; y: number; w: number; h: number } | null;
-}
-
-function getNodeHitBoxes(
-  node: LayoutNode,
-  tx: Transform
-): NodeHitBoxes {
-  const s = canvasToScreen(tx, node.x, node.y);
-  const sw = NODE_W * tx.k;
-  const sh = node.height * tx.k;
-
-  const expandY = s.y + 18;
-
-  return {
-    expandTriangle: {
-      x: s.x + sw - 40 * tx.k,
-      y: expandY - 10 * tx.k,
-      w: 24 * tx.k,
-      h: 20 * tx.k,
-    },
-    altDoubleArrow: node.type === "passived"
-      ? null
-      : {
-          x: s.x + 14 * tx.k,
-          y: s.y + 38 * tx.k,
-          w: 28 * tx.k,
-          h: 16 * tx.k,
-        },
-    toggleStrip: {
-      x: s.x,
-      y: s.y + sh - 22 * tx.k,
-      w: sw,
-      h: 22 * tx.k,
-    },
-  };
-}
-
-function isPointInCircle(px: number, py: number, cx: number, cy: number, r: number): boolean {
-  return (px - cx) ** 2 + (py - cy) ** 2 <= r ** 2;
-}
-
-function isPointInRect(px: number, py: number, rx: number, ry: number, rw: number, rh: number): boolean {
-  return px >= rx && px <= rx + rw && py >= ry && py <= ry + rh;
-}
-
-// ─── Canvas node renderer ────────────────────────────────────────────────────
-
-function drawNode(
-  ctx: CanvasRenderingContext2D,
-  node: LayoutNode,
-  isSelected: boolean,
-  isHovered: boolean,
-  isTreeEx: boolean,
-  isCardEx: boolean,
-  borderColor: string,
-  bgColor: string,
-  dotColor: string
-) {
-  const isPassived = node.type === "passived";
-  const x = node.x;
-  const y = node.y;
-  const w = NODE_W;
-  const h = node.height;
-
-  // ── Background ──
-  ctx.fillStyle = isSelected
-    ? "rgba(34,211,238,0.045)"
-    : bgColor;
-  ctx.beginPath();
-  ctx.roundRect(x, y, w, h, 8);
-  ctx.fill();
-
-  // ── Border ──
-  ctx.strokeStyle = borderColor;
-  ctx.lineWidth = isSelected || isHovered ? 1.5 : 1;
-  ctx.stroke();
-
-  // ── Type dot ──
-  ctx.fillStyle = dotColor;
-  ctx.beginPath();
-  ctx.arc(x + 14, y + 18, 3, 0, Math.PI * 2);
-  ctx.fill();
-
-  // ── Label ──
-  ctx.fillStyle = isSelected || isHovered ? dotColor : "rgba(255,255,255,0.9)";
-  ctx.font = "500 13px Inter, sans-serif";
-  ctx.textBaseline = "middle";
-  const label = node.label;
-  const maxW = w - 60;
-  let displayLabel = label;
-  if (ctx.measureText(label).width > maxW) {
-    while (
-      ctx.measureText(displayLabel + "…").width > maxW &&
-      displayLabel.length > 0
-    ) {
-      displayLabel = displayLabel.slice(0, -1);
-    }
-    displayLabel += "…";
-  }
-  ctx.fillText(displayLabel, x + 24, y + 18);
-
-  // ── Show alternatives button (⇅) — hidden for passived nodes ──
-  let altBtnW = 28;
-  let altBtnH = 16;
-  let altBtnX = x + 14;
-  let altBtnY = y + 38;
-
-  if (!isPassived) {
-    // Button background
-    ctx.fillStyle = hexToRgba(dotColor, 0.12);
-    ctx.beginPath();
-    ctx.roundRect(altBtnX, altBtnY, altBtnW, altBtnH, 4);
-    ctx.fill();
-
-    // Button border
-    ctx.strokeStyle = hexToRgba(dotColor, 0.2);
-    ctx.lineWidth = 0.5;
-    ctx.beginPath();
-    ctx.roundRect(altBtnX, altBtnY, altBtnW, altBtnH, 4);
-    ctx.stroke();
-
-    // Double-arrow symbol
-    ctx.fillStyle = dotColor;
-    ctx.font = "bold 11px sans-serif";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText("⇅", altBtnX + altBtnW / 2, altBtnY + altBtnH / 2);
-    ctx.textAlign = "left";
-    ctx.textBaseline = "alphabetic";
-  }
-
-  // ── Meta badge (to the right of alternatives button) ──
-  if (node.meta) {
-    const badgeText = node.meta;
-    const badgeW = ctx.measureText(badgeText).width + 10;
-    const badgeH = 16;
-    //const badgeX = isPassived ? altBtnX : altBtnX + altBtnW + 6;
-    const badgeX = isPassived ? altBtnX : altBtnX + altBtnW + 6;
-    const badgeY = altBtnY;
-
-    ctx.fillStyle = hexToRgba(dotColor, 0.12);
-    ctx.beginPath();
-    ctx.roundRect(badgeX, badgeY, badgeW, badgeH, 3);
-    ctx.fill();
-
-    ctx.fillStyle = dotColor;
-    ctx.font = "500 11x 'JetBrains Mono', monospace";
-    ctx.fillText(badgeText, badgeX + 4, badgeY + 12);
-  }
-
-  // ── Children count ──
-  if (node.children?.length) {
-    const childText = `${node.children.length} children`;
-    const textW = ctx.measureText(childText).width;
-    ctx.fillStyle = "rgba(255,255,255,0.4)";
-    ctx.font = "400 10px 'JetBrains Mono', monospace";
-    ctx.fillText(childText, x + w - textW - 14, y + 48);
-  }
-
-  // ── Expand/collapse indicator ──
-  if (node.children?.length) {
-    const triCx = x + w - 28;
-    const triCy = y + 18;
-    ctx.fillStyle = dotColor;
-    ctx.beginPath();
-    if (isTreeEx) {
-      // Expanded: chevron down
-      ctx.moveTo(triCx - 4, triCy - 2);
-      ctx.lineTo(triCx, triCy + 2);
-      ctx.lineTo(triCx + 4, triCy - 2);
-    } else {
-      // Collapsed: chevron right
-      ctx.moveTo(triCx - 2, triCy - 4);
-      ctx.lineTo(triCx + 2, triCy);
-      ctx.lineTo(triCx - 2, triCy + 4);
-    }
-    ctx.closePath();
-    ctx.fill();
-  }
-
-  // ── Image panel (if expanded) ──
-  if (isCardEx) {
-    const imgY = y + NODE_H_BASE;
-    const imgH = NODE_H_IMAGE;
-
-    // Separator line
-    ctx.strokeStyle = "rgba(255,255,255,0.07)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(x, imgY);
-    ctx.lineTo(x + w, imgY);
-    ctx.stroke();
-
-    // Image background
-    ctx.fillStyle = "rgba(255,255,255,0.02)";
-    ctx.fillRect(x, imgY, w, imgH);
-  }
-
-  // ── Toggle strip at bottom ──
-  const stripH = 22;
-  const stripY = y + h - stripH;
-
-  // Separator line
-  ctx.strokeStyle = "rgba(255,255,255,0.07)";
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(x, stripY);
-  ctx.lineTo(x + w, stripY);
-  ctx.stroke();
-
-  // Chevron down icon
-  const chevCx = x + w / 2;
-  const chevCy = stripY + stripH / 2;
-  ctx.strokeStyle = "rgba(255,255,255,0.4)";
-  ctx.lineWidth = 1.5;
-  ctx.lineCap = "round";
-  ctx.beginPath();
-  if (isCardEx) {
-    // Up chevron when expanded
-    ctx.moveTo(chevCx - 5, chevCy + 2);
-    ctx.lineTo(chevCx, chevCy - 2);
-    ctx.lineTo(chevCx + 5, chevCy + 2);
-  } else {
-    // Down chevron when collapsed
-    ctx.moveTo(chevCx - 5, chevCy - 2);
-    ctx.lineTo(chevCx, chevCy + 2);
-    ctx.lineTo(chevCx + 5, chevCy - 2);
-  }
-  ctx.stroke();
-}
-
 // ─── Main component ───────────────────────────────────────────────────────────
 
 const VIEWPORT_PAD = 120;
 
 export default function App() {
-  // ── Load persisted state on mount ────────────────────────────────────────
-  const saved = useMemo(() => loadState(), []);
+  // ── State declarations (extracted to hooks.ts) ──────────────────────────
+  const {
+    saved,
+    overrides, setOverrides,
+    altPanel, setAltPanel,
+    altLoading, setAltLoading,
+    treeRoot, setTreeRoot,
+    items, setItems,
+    loadedRecipes, setLoadedRecipes,
+    treeExpanded, setTreeExpanded,
+    cardExpanded, setCardExpanded,
+    selected, setSelected,
+    leafGroups, setLeafGroups,
+    activeLeafItemId, setActiveLeafItemId,
+    highlightSearch, setHighlightSearch,
+    highlightedIds, setHighlightedIds,
+    highlightMatchList, setHighlightMatchList,
+    highlightIdx, setHighlightIdx,
+    transform, setTransform,
+    searchQuery, setSearchQuery,
+    isLoading, setIsLoading,
+    passivedSet, setPassivedSet,
+    passivedList, setPassivedList,
+    showPassivedPanel, setShowPassivedPanel,
+    panActive, setPanActive,
+    hoveredNodeId, setHoveredNodeId,
+  } = useAppState();
 
-  const [overrides, setOverrides] = useState<Record<string, number>>(
-    saved?.overrides ?? {}
-  );
-  const [altPanel, setAltPanel] = useState<{
-    nodeId: string;
-    realItemId: string;
-    x: number;
-    y: number;
-    options: AltOption[];
-  } | null>(null);
-  const [altLoading, setAltLoading] = useState(false);
-
-  const [treeRoot, setTreeRoot] = useState<TreeNode | null>(null);
-  const [items, setItems] = useState<ItemsData>({});
-  const [loadedRecipes, setLoadedRecipes] = useState<RecipeMap>({});
-
-  const [treeExpanded, setTreeExpanded] = useState<Set<string>>(new Set());
-  const [cardExpanded, setCardExpanded] = useState<Set<string>>(new Set());
-  const [selected, setSelected] = useState<string | null>(saved?.selected ?? null);
-
-  const [leafGroups, setLeafGroups] = useState<Record<string, LeafGroup>>({});
-
-  // Track which sidebar item is currently "active" (showing which instance)
-  const [activeLeafItemId, setActiveLeafItemId] = useState<string | null>(null);
-
-  // Highlight search
-  const [highlightSearch, setHighlightSearch] = useState("");
-  const [highlightedIds, setHighlightedIds] = useState<Set<string>>(new Set());
-  const [highlightMatchList, setHighlightMatchList] = useState<LayoutNode[]>([]);
-  const [highlightIdx, setHighlightIdx] = useState(-1);
   const lastSearchQuery = useRef("");
-
-  // Pan + zoom transform
-  const [transform, setTransform] = useState<Transform>({ x: 48, y: 56, k: 1 });
-
-  const [searchQuery, setSearchQuery] = useState(saved?.searchQuery ?? "");
-  const [isLoading, setIsLoading] = useState(false);
-
-  // ── Passived list ───────────────────────────────────────────────────────
-  const [passivedSet, setPassivedSet] = useState<Set<string>>(new Set());
-  const [passivedList, setPassivedList] = useState<string[]>([]);
-  const [showPassivedPanel, setShowPassivedPanel] = useState(false);
-
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
@@ -656,10 +204,6 @@ export default function App() {
   const dragOrigin = useRef({ mx: 0, my: 0, px: 0, py: 0 });
   const rafId = useRef<number | null>(null);
   const pendingTransform = useRef<Transform>({ x: 48, y: 56, k: 1 });
-  const [panActive, setPanActive] = useState(false);
-
-  // Hover state
-  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
 
   // ── Persist state to localStorage ────────────────────────────────────────
   const persistState = useCallback(() => {
