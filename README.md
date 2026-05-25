@@ -39,15 +39,24 @@
 - [ ] Limit tree by total node count, not depth
 - [ ] Items in passived should be able to be expanded if it is the root
 - [ ] Redo passived tab
+- [ ] Add recipe card previews when hovering over alteranatives
+- [ ] Zoom smoothing
+- [ ] Passive item should accept both id and name
 
+### BUGS
+- [ ] Sidebar first click expands then views, should do both in 1 click
+- [ ] Fix rendering issue. Idk why it happens
+- [ ] Collapse all should reset view
 ### RECIPE FILTERING
 - [x] Remove runic altar from runic altar recipes
 - [x] Thaumotorium automation
 - [ ] Resource miners
-- [ ] Master of spellcraft
+- [x] Master of spellcraft
 - [x] HNN
 - [x] living recursive essence
 - [x] biome item
 - [x] remove EIO power
 - [x] Terminate all essentia by removing inputs from mechanized essentia smeltery
 - [ ] Fix essentia quantity
+- [x] Remove NC collector inputs
+- [ ] Pure void, seared caster recipe missing
