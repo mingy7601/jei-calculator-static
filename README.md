@@ -42,4 +42,7 @@
 - [ ] Thaumotorium automation
 - [ ] Resource miners
 - [ ] Master of spellcraft
-- [ ] 
+- [ ] HNN
+- [ ] living recursive essence
+- [ ] biome item
+- [ ] sacred cinders remove inputs

@@ -386,12 +386,14 @@ function getNodeHitBoxes(
       w: 24 * tx.k,
       h: 20 * tx.k,
     },
-    altDoubleArrow: {
-      x: s.x + 14 * tx.k,
-      y: s.y + 38 * tx.k,
-      w: 28 * tx.k,
-      h: 16 * tx.k,
-    },
+    altDoubleArrow: node.type === "passived"
+      ? null
+      : {
+          x: s.x + 14 * tx.k,
+          y: s.y + 38 * tx.k,
+          w: 28 * tx.k,
+          h: 16 * tx.k,
+        },
     toggleStrip: {
       x: s.x,
       y: s.y + sh - 22 * tx.k,
@@ -422,6 +424,7 @@ function drawNode(
   bgColor: string,
   dotColor: string
 ) {
+  const isPassived = node.type === "passived";
   const x = node.x;
   const y = node.y;
   const w = NODE_W;
@@ -464,40 +467,43 @@ function drawNode(
   }
   ctx.fillText(displayLabel, x + 24, y + 18);
 
-  // ── Show alternatives button (⇅) ──
-  const altBtnW = 28;
-  const altBtnH = 16;
-  const altBtnX = x + 14;
-  const altBtnY = y + 38;
+  // ── Show alternatives button (⇅) — hidden for passived nodes ──
+  let altBtnW = 28;
+  let altBtnH = 16;
+  let altBtnX = x + 14;
+  let altBtnY = y + 38;
 
-  // Button background
-  ctx.fillStyle = hexToRgba(dotColor, 0.12);
-  ctx.beginPath();
-  ctx.roundRect(altBtnX, altBtnY, altBtnW, altBtnH, 4);
-  ctx.fill();
+  if (!isPassived) {
+    // Button background
+    ctx.fillStyle = hexToRgba(dotColor, 0.12);
+    ctx.beginPath();
+    ctx.roundRect(altBtnX, altBtnY, altBtnW, altBtnH, 4);
+    ctx.fill();
 
-  // Button border
-  ctx.strokeStyle = hexToRgba(dotColor, 0.2);
-  ctx.lineWidth = 0.5;
-  ctx.beginPath();
-  ctx.roundRect(altBtnX, altBtnY, altBtnW, altBtnH, 4);
-  ctx.stroke();
+    // Button border
+    ctx.strokeStyle = hexToRgba(dotColor, 0.2);
+    ctx.lineWidth = 0.5;
+    ctx.beginPath();
+    ctx.roundRect(altBtnX, altBtnY, altBtnW, altBtnH, 4);
+    ctx.stroke();
 
-  // Double-arrow symbol
-  ctx.fillStyle = dotColor;
-  ctx.font = "bold 11px sans-serif";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText("⇅", altBtnX + altBtnW / 2, altBtnY + altBtnH / 2);
-  ctx.textAlign = "left";
-  ctx.textBaseline = "alphabetic";
+    // Double-arrow symbol
+    ctx.fillStyle = dotColor;
+    ctx.font = "bold 11px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("⇅", altBtnX + altBtnW / 2, altBtnY + altBtnH / 2);
+    ctx.textAlign = "left";
+    ctx.textBaseline = "alphabetic";
+  }
 
   // ── Meta badge (to the right of alternatives button) ──
   if (node.meta) {
     const badgeText = node.meta;
     const badgeW = ctx.measureText(badgeText).width + 10;
     const badgeH = 16;
-    const badgeX = altBtnX + altBtnW + 6;
+    //const badgeX = isPassived ? altBtnX : altBtnX + altBtnW + 6;
+    const badgeX = isPassived ? altBtnX : altBtnX + altBtnW + 6;
     const badgeY = altBtnY;
 
     ctx.fillStyle = hexToRgba(dotColor, 0.12);
@@ -1127,6 +1133,7 @@ export default function App() {
         // Show alternatives double-arrow hit → show alternatives panel
         if (
           boxes.altDoubleArrow &&
+          node.type !== "passived" &&
           isPointInRect(mx, my, boxes.altDoubleArrow.x, boxes.altDoubleArrow.y, boxes.altDoubleArrow.w, boxes.altDoubleArrow.h)
         ) {
           const realItemId = node.itemId ?? node.id;
