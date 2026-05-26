@@ -13,7 +13,7 @@ export interface TreeNode {
   item: string;
   name: string;
   qty?: number;
-  source?: "base" | "cycle" | "limit" | "emc" | "passived" | "unknown";
+  source?: "base" | "cycle" | "limit" | "emc" | "passived" | "unknown" | "reroute";
   step?: number;
   category?: string;
   category_name?: string;
@@ -52,19 +52,35 @@ function cycleCacheKey(inputId: string, targetId: string): string {
 }
 
 /**
- * Returns true if there is NO viable (non-cyclic) recipe for inputId
- * that doesn't eventually require targetId.
- * Mirrors the Python would_cycle logic exactly.
+ * Two-tier cycle detection return values:
+ *   0 — no cycle detected
+ *   1 — immediate loop (depth 1): e.g. A → child_recipe → A
+ *       → should be rerouted (try alternative recipe)
+ *   2+ — deferred loop (depth ≥ 2): e.g. A → B → C → A
+ *       → treat the second occurrence as a leaf node
+ *
+ * With maxDepth=1, only immediate loops are detected here.
+ * Deferred loops (depth ≥ 2) are caught by visited.has() in buildTree
+ * when the recursive call reaches the ancestor item.
  */
 export function wouldCycle(
   inputId: string,
   targetId: string,
   recipes: RecipeMap,
   depth = 0,
-  maxDepth = 2
-): boolean {
-  if (inputId === targetId) return true;
-  if (depth >= maxDepth) return false;
+  maxDepth = 1,
+  visited?: ReadonlySet<string>,
+  _nodeCount?: { count: number },
+  maxNodes?: number
+): number {
+  // Recursion stack check — catches cycles within the current build path
+  if (visited?.has(inputId)) return depth + 1;
+  // Direct self-reference
+  if (inputId === targetId) return 1;
+  // Depth limit — stop searching for longer cycles
+  if (depth >= maxDepth) return 0;
+  // Node budget exhausted — stop to prevent stall
+  if (_nodeCount && maxNodes && _nodeCount.count >= maxNodes) return 0;
 
   const cacheKey = cycleCacheKey(inputId, targetId);
   const cached = cycleCache.get(cacheKey);
@@ -72,25 +88,20 @@ export function wouldCycle(
 
   const options = recipes[inputId];
   if (!options?.length) {
-    cycleCache.set(cacheKey, false);
-    return false;
+    cycleCache.set(cacheKey, 0);
+    return 0;
   }
 
   const viable = options.filter(
     (r) =>
       !r.inputs.some((inp) =>
-        wouldCycle(inp.id, targetId, recipes, depth + 1, maxDepth)
+        wouldCycle(inp.id, targetId, recipes, depth + 1, maxDepth, visited, _nodeCount, maxNodes)
       )
   );
 
-  const result = viable.length === 0;
+  const result = viable.length === 0 ? 1 : 0;
   cycleCache.set(cacheKey, result);
   return result;
-}
-
-/** Clear the cycle detection cache (call between different tree builds) */
-export function clearCycleCache(): void {
-  cycleCache.clear();
 }
 
 // ── Build tree ────────────────────────────────────────────────────────────────
@@ -99,7 +110,6 @@ export function buildTree(
   item: string,
   recipes: RecipeMap,
   step = 0,
-  maxSteps = 5,
   opts: {
     name?: string;
     visited?: ReadonlySet<string>;
@@ -109,11 +119,14 @@ export function buildTree(
     passived?: ReadonlySet<string>;
     /** Memoization cache to prevent exponential blowup on DAGs */
     memo?: Map<string, TreeNode>;
+    /** Maximum total nodes to generate before stopping (default 100000) */
+    maxNodes?: number;
+    /** Shared mutable counter for tracking total nodes */
+    _nodeCount?: { count: number };
+    /** Hard depth limit to prevent infinite recursion (default 20) */
+    maxDepth?: number;
   } = {}
 ): TreeNode {
-  // Clear cycle cache for each new tree build
-  clearCycleCache();
-
   const {
     name,
     visited = new Set<string>(),
@@ -121,47 +134,66 @@ export function buildTree(
     emcValues = {},
     passived = new Set<string>(),
     memo = new Map<string, TreeNode>(),
+    maxNodes = 100000,
+    _nodeCount = { count: 0 },
+    maxDepth = 10,
   } = opts;
 
   if (visited.has(item)) {
-    return { item, name: name ?? item, source: "cycle" };
+    return { item, name: name ?? item, source: "cycle" } as TreeNode;
   }
-  if (step >= maxSteps) {
-    return { item, name: name ?? item, source: "limit" };
+  if (step >= maxDepth) {
+    return { item, name: name ?? item, source: "limit" } as TreeNode;
+  }
+  if (_nodeCount.count >= maxNodes) {
+    return { item, name: name ?? item, source: "limit" } as TreeNode;
   }
 
   // ── DAG memoization by (item, step) to prevent exponential blowup ──
-  // For a given item at a given step, the result is deterministic regardless
-  // of visited set (visited only affects cycle detection limited to depth 2).
+  // Only valid when visited is empty (no recursion stack context).
+  // When visited is non-empty, the result depends on cycle detection context,
+  // so we skip memoization to avoid incorrect cached results.
   const memoKey = `${item}\0${step}`;
-  const cached = memo.get(memoKey);
+  const cached = visited.size === 0 ? memo.get(memoKey) : undefined;
   if (cached) return cached;
 
   // ── Passived check ──
   // If the item is in the passived set, treat it as a leaf node
   // regardless of whether recipes exist for it.
   if (passived.has(item)) {
-    const result = { item, name: name ?? item, source: "passived" };
+    const result: TreeNode = { item, name: name ?? item, source: "passived" };
     memo.set(memoKey, result);
     return result;
   }
 
   const options = recipes[item];
   if (!options?.length) {
-    const result = { item, name: name ?? item, source: "base" };
+    const result: TreeNode = { item, name: name ?? item, source: "base" };
     memo.set(memoKey, result);
     return result;
   }
 
   const childVisited = new Set(visited).add(item);
 
-  // Filter to non-cyclic recipes only
+  // Two-tier cycle filtering:
+  //   depth 1 (immediate loop): reroute — filter out this recipe, try alternatives
+  //   depth > 1 (deferred loop): leaf — the second occurrence becomes a leaf node
+  // We check each recipe's inputs: if any input would cause a cycle at depth 1,
+  // the recipe is excluded (reroute). If depth > 1, the input will be expanded
+  // but the second occurrence will be caught by visited.has() in buildTree.
   let viable = options.filter(
-    (r) => !r.inputs.some((inp) => wouldCycle(inp.id, item, recipes))
+    (r) => !r.inputs.some((inp) => {
+      const cycleDepth = wouldCycle(inp.id, item, recipes, 0, maxDepth, visited, _nodeCount, maxNodes);
+      // depth 1 = immediate loop → reroute (exclude recipe)
+      // depth > 1 = deferred loop → keep recipe (second occurrence becomes leaf)
+      return cycleDepth === 1;
+    })
   );
 
+  // If no viable recipes remain after rerouting all immediate loops,
+  // return a cycle leaf node (the item itself is the cycle root)
   if (!viable.length) {
-    const result = { item, name: name ?? item, source: "cycle" };
+    const result: TreeNode = { item, name: name ?? item, source: "cycle" };
     memo.set(memoKey, result);
     return result;
   }
@@ -184,7 +216,37 @@ export function buildTree(
 
   const recipe = viable[0];
 
-  const result = {
+  _nodeCount.count++;
+
+  // Check node budget before expanding inputs
+  if (_nodeCount.count >= maxNodes) {
+    const result: TreeNode = { item, name: name ?? item, step, source: "limit" };
+    memo.set(memoKey, result);
+    return result;
+  }
+
+  const inputs: TreeNode[] = [];
+  for (const inp of recipe.inputs) {
+    // Re-check budget before each input
+    if (_nodeCount.count >= maxNodes) break;
+    const hasEmc = !!emcValues[inp.id];
+    const child: TreeNode = hasEmc
+      ? { item: inp.id, name: inp.name ?? inp.id, source: "emc" }
+      : buildTree(inp.id, recipes, step + 1, {
+          name: inp.name,
+          visited: childVisited,
+          overrides,
+          emcValues,
+          passived,
+          memo,
+          _nodeCount,
+          maxNodes,
+          maxDepth,
+        });
+    inputs.push({ ...child, qty: inp.qty ?? 1 });
+  }
+
+  const result: TreeNode = {
     item,
     name: name ?? item,
     step,
@@ -192,20 +254,7 @@ export function buildTree(
     category_name: recipe.category_name,
     image_path: recipe.image_path,
     outputs: recipe.outputs,
-    inputs: recipe.inputs.map((inp) => {
-      const hasEmc = !!emcValues[inp.id];
-      const child: TreeNode = hasEmc
-        ? { item: inp.id, name: inp.name ?? inp.id, source: "emc" }
-        : buildTree(inp.id, recipes, step + 1, maxSteps, {
-            name: inp.name,
-            visited: childVisited,
-            overrides,
-            emcValues,
-            passived,
-            memo,
-          });
-      return { ...child, qty: inp.qty ?? 1 };
-    }),
+    inputs,
   };
 
   // Cache the final result

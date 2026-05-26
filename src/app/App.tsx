@@ -34,6 +34,7 @@ const TYPE_CONFIG: Record<NodeType, { dot: string; badge: string; text: string; 
   resource:  { dot: "#94a3b8", badge: "rgba(148,163,184,0.09)", text: "#94a3b8", label: "Raw Resource", bg: "rgba(148,163,184,0.04)" },
   emc:       { dot: "#a855f7", badge: "rgba(168,85,247,0.12)",  text: "#a855f7", label: "EMC",          bg: "rgba(168,85,247,0.06)" },
   passived:  { dot: "#facc15", badge: "rgba(250,204,21,0.12)",  text: "#facc15", label: "Passived",     bg: "rgba(250,204,21,0.06)" },
+  cycle:     { dot: "#ef4444", badge: "rgba(239,68,68,0.12)",   text: "#ef4444", label: "Cycle",        bg: "rgba(239,68,68,0.04)" },
 };
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
@@ -69,7 +70,7 @@ function countAll(node: TreeNode): number {
 
 // ─── Convert raw TreeNode → display TreeNode ──────────────────────────────────
 
-const MAX_STEPS = 10;
+
 function rawToDisplay(node: RawTreeNode, isRoot = false): TreeNode {
   const itemId = node.item ?? "unknown";
   const source = node.source;
@@ -81,6 +82,8 @@ function rawToDisplay(node: RawTreeNode, isRoot = false): TreeNode {
     nodeType = "emc";
   } else if (source === "passived") {
     nodeType = "passived";
+  } else if (source === "cycle") {
+    nodeType = "cycle";
   } else if (source === "base" || source === "unknown") {
     nodeType = "resource";
   } else if (!node.inputs?.length) {
@@ -95,7 +98,7 @@ function rawToDisplay(node: RawTreeNode, isRoot = false): TreeNode {
   const qtyStr = Number.isInteger(qty) ? String(qty) : qty.toFixed(1);
   const displayLabel = `${label} x ${qtyStr}`;
 
-  const meta = nodeType === "emc" ? "emc" : (nodeType === "passived" ? "passived" : (node.category_name ?? "N/A"));
+  const meta = nodeType === "emc" ? "emc" : (nodeType === "passived" ? "passived" : (nodeType === "cycle" ? "cycle" : (node.category_name ?? "N/A")));
   const imageUrl = node.image_path ? `/static/${node.image_path}` : undefined;
 
   const result: TreeNode = {
@@ -138,13 +141,13 @@ async function loadTree(
   })();
 
   const recipes = getLoadedRecipes();
-  const shallowTree = buildTree(itemId, recipes, 0, MAX_STEPS, { name: rootName, overrides, emcValues, passived });
+  const shallowTree = buildTree(itemId, recipes, 0, { name: rootName, overrides, emcValues, passived });
   const allIds = Array.from(collectItemIds(shallowTree));
 
   await preWarmShards(allIds);
 
   const fullRecipes = getLoadedRecipes();
-  const rawTree = buildTree(itemId, fullRecipes, 0, MAX_STEPS, { name: rootName, overrides, emcValues, passived });
+  const rawTree = buildTree(itemId, fullRecipes, 0, { name: rootName, overrides, emcValues, passived });
 
   return { displayTree: rawToDisplay(rawTree, true), rawTree, recipes: fullRecipes, emcValues };
 }

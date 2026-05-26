@@ -10,7 +10,7 @@ import type { TreeNode as RawTreeNode } from "./tree";
 
 // ─── Node type system ───────────────────────────────────────────────────────
 
-export type NodeType = "root" | "service" | "module" | "component" | "resource" | "emc" | "passived";
+export type NodeType = "root" | "service" | "module" | "component" | "resource" | "emc" | "passived" | "cycle";
 
 // ─── Tree node (display) ────────────────────────────────────────────────────
 

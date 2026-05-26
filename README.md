@@ -2,6 +2,10 @@
 
 
 ### TODO
+- [ ] Make invalid search return item not found
+- [ ] Create a search bar helper
+- [ ] Toggle to hide emc items from raw materials
+- [ ] Limit tree by total node count, not depth
 
 - [x] Images
 - [ ] Small icon next to each node
@@ -19,16 +23,13 @@
 - [x] ~~Cache loaded recipe file~~ Lazy load recipes based on category
 - [ ] MMCE upgrades (no idea how I'm going to autogenerate these)
 - [ ] Limit the height of the canvas and spread the tree across a greater area
-- [ ] Create a search bar helper
 - [ ] Item vs fluid handling
 - [ ] Initially expanded alt does not show current active
 - [x] Add timers to show loading speeds
-- [ ] Make invalid search return item not found
 - [x] Filter out fluid filling / extracting recipes
 - [x] Add machine priority between similar machines
 - [ ] Remove redundant recipes when there is a clear upgrade
 - [ ] Someday get rid of the item: tag before every item
-- [ ] Toggle to hide emc items from raw materials
 - [x] Order raw materials by quantity
 - [ ] Toggle fluids and items in raw materials
 - [ ] Add quantity for root item
@@ -36,7 +37,6 @@
 - [x] Handle recursive recipes
 - [ ] Make alternatives panel disapear on mouse click
 - [ ] Remove alternatives button for leaf + passive nodes
-- [ ] Limit tree by total node count, not depth
 - [ ] Items in passived should be able to be expanded if it is the root
 - [ ] Redo passived tab
 - [ ] Add recipe card previews when hovering over alteranatives
@@ -60,3 +60,4 @@
 - [ ] Fix essentia quantity
 - [x] Remove NC collector inputs
 - [ ] Pure void, seared caster recipe missing
+- [x] Mechanized coops
