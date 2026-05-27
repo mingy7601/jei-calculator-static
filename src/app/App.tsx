@@ -16,7 +16,7 @@ import { useAppState } from "./hooks";
 import { Search, Loader2 } from "lucide-react";
 import { Toaster, toast } from "sonner";
 
-import { getManifest, getEmcMap, getRecipes, preWarmShards, resolveItemId, getLoadedRecipes, getPassivedList, savePassivedList, type RecipeMap, type EmcMap } from "./data";
+import { getManifest, getEmcMap, getRecipes, preWarmShards, resolveItemId, getLoadedRecipes, getPassivedList, savePassivedList, getManifestData, type RecipeMap, type EmcMap } from "./data";
 import { buildTree, wouldCycle, collectItemIds, type TreeNode as RawTreeNode } from "./tree";
 import { sumLeafIngredients } from "./ingredients";
 import { loadState, saveState, clearState } from "./state-persist";
@@ -190,6 +190,9 @@ export default function App() {
     highlightIdx, setHighlightIdx,
     transform, setTransform,
     searchQuery, setSearchQuery,
+    autoCompleteOpen, setAutoCompleteOpen,
+    autoCompleteItems, setAutoCompleteItems,
+    autoCompleteIdx, setAutoCompleteIdx,
     isLoading, setIsLoading,
     passivedSet, setPassivedSet,
     passivedList, setPassivedList,
@@ -200,6 +203,7 @@ export default function App() {
 
   const lastSearchQuery = useRef("");
 
+  const autoCompleteRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -208,6 +212,7 @@ export default function App() {
   const rafId = useRef<number | null>(null);
   const pendingTransform = useRef<Transform>({ x: 48, y: 56, k: 1 });
   const pendingCenterNodeId = useRef<string | null>(null);
+  const autoCompleteTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── Persist state to localStorage ────────────────────────────────────────
   const persistState = useCallback(() => {
@@ -218,6 +223,123 @@ export default function App() {
       selected,
     });
   }, [searchQuery, overrides, selected]);
+
+  // ── Autocomplete logic ───────────────────────────────────────────────────
+  const MAX_SUGGESTIONS = 8;
+
+  const filterSuggestions = useCallback(
+    (query: string) => {
+      if (!query || query.length < 1) {
+        setAutoCompleteItems([]);
+        setAutoCompleteOpen(false);
+        setAutoCompleteIdx(-1);
+        return;
+      }
+      const q = query.toLowerCase();
+      // Read name→id mapping from the manifest (loaded by getManifest on mount)
+      const mf = getManifestData();
+      if (!mf) {
+        setAutoCompleteItems([]);
+        setAutoCompleteOpen(false);
+        setAutoCompleteIdx(-1);
+        return;
+      }
+      const nameToId = mf.nameToId;
+      const results: { name: string; id: string }[] = [];
+      for (const [name, id] of Object.entries(nameToId)) {
+        if (name.includes(q)) {
+          results.push({ name, id });
+          if (results.length >= MAX_SUGGESTIONS) break;
+        }
+      }
+      setAutoCompleteItems(results);
+      setAutoCompleteOpen(results.length > 0);
+      setAutoCompleteIdx(-1);
+    },
+    []
+  );
+
+  // Debounced autocomplete filter — fires 150ms after typing stops
+  const handleSearchInputChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const val = e.target.value;
+      setSearchQuery(val);
+      persistState();
+      if (autoCompleteTimer.current) clearTimeout(autoCompleteTimer.current);
+      autoCompleteTimer.current = setTimeout(() => filterSuggestions(val), 150);
+    },
+    [setSearchQuery, persistState, filterSuggestions]
+  );
+
+  // Close autocomplete on click outside
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (
+        autoCompleteRef.current &&
+        !autoCompleteRef.current.contains(e.target as Node)
+      ) {
+        setAutoCompleteOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  // Keyboard navigation for autocomplete
+  const handleSearchKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLInputElement>) => {
+      if (autoCompleteOpen && autoCompleteItems.length > 0) {
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          setAutoCompleteIdx((prev) =>
+            prev < autoCompleteItems.length - 1 ? prev + 1 : 0
+          );
+          return;
+        }
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          setAutoCompleteIdx((prev) =>
+            prev > 0 ? prev - 1 : autoCompleteItems.length - 1
+          );
+          return;
+        }
+        if (e.key === "Enter") {
+          e.preventDefault();
+          if (autoCompleteIdx >= 0 && autoCompleteItems[autoCompleteIdx]) {
+            const sel = autoCompleteItems[autoCompleteIdx];
+            setSearchQuery(sel.name);
+            setAutoCompleteOpen(false);
+            setAutoCompleteIdx(-1);
+            // Submit the form to load the tree
+            const form = e.currentTarget.closest("form");
+            form?.requestSubmit();
+          } else {
+            // No selection — just submit as-is
+            const form = e.currentTarget.closest("form");
+            form?.requestSubmit();
+          }
+          return;
+        }
+        if (e.key === "Escape") {
+          e.preventDefault();
+          setAutoCompleteOpen(false);
+          return;
+        }
+      }
+      // Otherwise let the event propagate normally
+    },
+    [autoCompleteOpen, autoCompleteItems, autoCompleteIdx, setSearchQuery]
+  );
+
+  // Select a suggestion by click
+  const handleSuggestionClick = useCallback(
+    (name: string) => {
+      setSearchQuery(name);
+      setAutoCompleteOpen(false);
+      setAutoCompleteIdx(-1);
+    },
+    [setSearchQuery]
+  );
 
   // Save on page unload as safety net (inline to avoid stale closure)
   useEffect(() => {
@@ -1039,21 +1161,39 @@ export default function App() {
             <div className="w-px h-5 bg-border shrink-0" />
 
             <form onSubmit={handleSearch} className="flex items-center gap-2 flex-1 min-w-0">
-              <div className="relative flex-1 min-w-0 max-w-md">
+              <div className="relative flex-1 min-w-0 max-w-md" ref={autoCompleteRef}>
                 <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
                 <input
                   type="text"
                   value={searchQuery}
-                  onChange={(e) => {
-                    setSearchQuery(e.target.value);
-                    // Persist search query as user types
-                    persistState();
-                  }}
+                  onChange={handleSearchInputChange}
+                  onKeyDown={handleSearchKeyDown}
                   placeholder="Search or enter an ID to load as root…"
                   disabled={isLoading}
                   className="w-full h-7 pl-8 pr-3 text-xs rounded border border-border bg-transparent text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-[rgba(34,211,238,0.4)] focus:ring-1 focus:ring-[rgba(34,211,238,0.15)] transition-colors disabled:opacity-50"
                   style={{ fontFamily: "'JetBrains Mono', monospace" }}
                 />
+                {autoCompleteOpen && autoCompleteItems.length > 0 && (
+                  <div
+                    className="absolute top-full left-0 right-0 mt-0.5 z-50 rounded border border-border bg-[#0e0e1a] shadow-lg overflow-hidden"
+                    style={{ maxHeight: `${MAX_SUGGESTIONS * 28 + 2}px`, overflowY: "auto" }}
+                  >
+                    {autoCompleteItems.map((item, idx) => (
+                      <button
+                        key={item.id}
+                        onClick={() => handleSuggestionClick(item.name)}
+                        className={`w-full text-left px-2 py-0.5 text-xs truncate transition-colors ${
+                          idx === autoCompleteIdx
+                            ? "bg-[rgba(34,211,238,0.12)] text-cyan-300"
+                            : "text-muted-foreground hover:bg-white/5"
+                        }`}
+                        style={{ fontFamily: "'JetBrains Mono', monospace", lineHeight: "28px" }}
+                      >
+                        {item.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
               <button
                 type="submit"

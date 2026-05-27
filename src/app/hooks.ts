@@ -105,6 +105,13 @@ export function useAppState() {
   // ID of the node currently under the mouse cursor
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
 
+  // Autocomplete dropdown state for the main search bar
+  const [autoCompleteOpen, setAutoCompleteOpen] = useState(false);
+  const [autoCompleteItems, setAutoCompleteItems] = useState<
+    { name: string; id: string }[]
+  >([]);
+  const [autoCompleteIdx, setAutoCompleteIdx] = useState(-1);
+
   return {
     saved,
     overrides, setOverrides,
@@ -130,5 +137,8 @@ export function useAppState() {
     showPassivedPanel, setShowPassivedPanel,
     panActive, setPanActive,
     hoveredNodeId, setHoveredNodeId,
+    autoCompleteOpen, setAutoCompleteOpen,
+    autoCompleteItems, setAutoCompleteItems,
+    autoCompleteIdx, setAutoCompleteIdx,
   };
 }

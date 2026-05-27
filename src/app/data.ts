@@ -85,6 +85,11 @@ export async function getManifest(): Promise<Manifest> {
   return manifest;
 }
 
+/** Expose the manifest for autocomplete lookups. */
+export function getManifestData(): Manifest | null {
+  return manifest;
+}
+
 // ── EMC ───────────────────────────────────────────────────────────────────────
 
 export async function getEmcMap(): Promise<EmcMap> {
