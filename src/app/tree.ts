@@ -44,8 +44,8 @@ function outputQty(recipe: Recipe, itemId: string): number {
 
 // ── Cycle detection ───────────────────────────────────────────────────────────
 
-/** Memoized wouldCycle cache: "inputId:targetId" → boolean */
-let cycleCache = new Map<string, boolean>();
+/** Memoized wouldCycle cache: "inputId:targetId" → cycle depth (0 = no cycle, 1 = immediate loop, 2+ = deferred) */
+let cycleCache = new Map<string, number>();
 
 function cycleCacheKey(inputId: string, targetId: string): string {
   return inputId + "\0" + targetId;
@@ -127,6 +127,10 @@ export function buildTree(
     maxDepth?: number;
   } = {}
 ): TreeNode {
+  // Per-build cache to deduplicate wouldCycle calls across recipes
+  // that share the same inputs (common in crafting mod DAGs)
+  const cycleCheckCache = new Map<string, number>();
+
   const {
     name,
     visited = new Set<string>(),
@@ -134,9 +138,9 @@ export function buildTree(
     emcValues = {},
     passived = new Set<string>(),
     memo = new Map<string, TreeNode>(),
-    maxNodes = 100000,
+    maxNodes = 1000000,
     _nodeCount = { count: 0 },
-    maxDepth = 10,
+    maxDepth = 20,
   } = opts;
 
   if (visited.has(item)) {
@@ -181,14 +185,21 @@ export function buildTree(
   // We check each recipe's inputs: if any input would cause a cycle at depth 1,
   // the recipe is excluded (reroute). If depth > 1, the input will be expanded
   // but the second occurrence will be caught by visited.has() in buildTree.
-  let viable = options.filter(
-    (r) => !r.inputs.some((inp) => {
-      const cycleDepth = wouldCycle(inp.id, item, recipes, 0, maxDepth, visited, _nodeCount, maxNodes);
-      // depth 1 = immediate loop → reroute (exclude recipe)
-      // depth > 1 = deferred loop → keep recipe (second occurrence becomes leaf)
+  let viable = options.filter((r) => {
+    // depth 1 = immediate loop → reroute (exclude recipe)
+    // depth > 1 = deferred loop → keep recipe (second occurrence becomes leaf)
+    return !r.inputs.some((inp) => {
+      const checkKey = inp.id + "\0" + item;
+      let cycleDepth: number;
+      if (cycleCheckCache.has(checkKey)) {
+        cycleDepth = cycleCheckCache.get(checkKey)!;
+      } else {
+        cycleDepth = wouldCycle(inp.id, item, recipes, 0, maxDepth, visited, _nodeCount, maxNodes);
+        cycleCheckCache.set(checkKey, cycleDepth);
+      }
       return cycleDepth === 1;
-    })
-  );
+    });
+  });
 
   // If no viable recipes remain after rerouting all immediate loops,
   // return a cycle leaf node (the item itself is the cycle root)
@@ -198,23 +209,31 @@ export function buildTree(
     return result;
   }
 
-  // Sort: highest output qty first, then machine priority
-  viable = [...viable].sort((a, b) => {
-    const qtyDiff = outputQty(b, item) - outputQty(a, item);
-    if (qtyDiff !== 0) return qtyDiff;
-    return machinePriority(a) - machinePriority(b);
-  });
-
-  // Apply override
+  // Find best recipe in O(n) — only need the top one
   const overrideId = overrides[item];
-  if (overrideId != null) {
-    const preferred = viable.find((r) => r.id === overrideId);
-    if (preferred) {
-      viable = [preferred, ...viable.filter((r) => r.id !== overrideId)];
+  let best: Recipe = viable[0];
+  for (let i = 1; i < viable.length; i++) {
+    const r = viable[i];
+    const rQty = outputQty(r, item);
+    const bQty = outputQty(best, item);
+    if (rQty > bQty) {
+      best = r;
+    } else if (rQty === bQty && machinePriority(r) < machinePriority(best)) {
+      best = r;
+    }
+  }
+  // Apply override: if user picked a different recipe, use it first
+  if (overrideId != null && overrideId !== best.id) {
+    const preferredIdx = viable.findIndex((r) => r.id === overrideId);
+    if (preferredIdx > 0) {
+      // Move override to front; best stays second
+      viable[0] = viable[preferredIdx];
+      viable[preferredIdx] = best;
+      best = viable[0];
     }
   }
 
-  const recipe = viable[0];
+  const recipe = best;
 
   _nodeCount.count++;
 
@@ -225,9 +244,14 @@ export function buildTree(
     return result;
   }
 
+  // Equal-split budget: every input gets at least one node before any
+  // single branch can exhaust the total budget.  This ensures all inputs
+  // are processed even when the tree is large.
+  const remaining = maxNodes - _nodeCount.count;
+  const share = Math.max(1, Math.floor(remaining / recipe.inputs.length));
+
   const inputs: TreeNode[] = [];
   for (const inp of recipe.inputs) {
-    // Re-check budget before each input
     if (_nodeCount.count >= maxNodes) break;
     const hasEmc = !!emcValues[inp.id];
     const child: TreeNode = hasEmc
@@ -240,7 +264,7 @@ export function buildTree(
           passived,
           memo,
           _nodeCount,
-          maxNodes,
+          maxNodes: _nodeCount.count + share,
           maxDepth,
         });
     inputs.push({ ...child, qty: inp.qty ?? 1 });

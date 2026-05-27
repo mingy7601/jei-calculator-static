@@ -44,9 +44,9 @@
 - [ ] Passive item should accept both id and name
 
 ### BUGS
-- [ ] Sidebar first click expands then views, should do both in 1 click
+- [x] Sidebar first click expands then views, should do both in 1 click
 - [ ] Fix rendering issue. Idk why it happens
-- [ ] Collapse all should reset view
+- [x] Collapse all should reset view
 ### RECIPE FILTERING
 - [x] Remove runic altar from runic altar recipes
 - [x] Thaumotorium automation

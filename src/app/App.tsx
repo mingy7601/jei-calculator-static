@@ -207,6 +207,7 @@ export default function App() {
   const dragOrigin = useRef({ mx: 0, my: 0, px: 0, py: 0 });
   const rafId = useRef<number | null>(null);
   const pendingTransform = useRef<Transform>({ x: 48, y: 56, k: 1 });
+  const pendingCenterNodeId = useRef<string | null>(null);
 
   // ── Persist state to localStorage ────────────────────────────────────────
   const persistState = useCallback(() => {
@@ -316,6 +317,25 @@ export default function App() {
   useLayoutEffect(() => {
     nodesRef.current = nodes;
   }, [nodes]);
+
+  // ── Center and select node after deferred expansion ─────────────────────
+  useEffect(() => {
+    const targetId = pendingCenterNodeId.current;
+    if (!targetId) return;
+    pendingCenterNodeId.current = null;
+
+    const target = byId.get(targetId);
+    if (!target) return;
+
+    const cw = containerRef.current?.clientWidth ?? window.innerWidth;
+    const ch = containerRef.current?.clientHeight ?? window.innerHeight;
+    setTransform({
+      x: cw / 2 - target.x - NODE_W / 2,
+      y: ch / 2 - target.y - target.height / 2,
+      k: pendingTransform.current.k,
+    });
+    pendingTransform.current = { x: cw / 2 - target.x - NODE_W / 2, y: ch / 2 - target.y - target.height / 2, k: pendingTransform.current.k };
+  }, [nodes, byId, setTransform]);
 
 
 
@@ -771,6 +791,9 @@ export default function App() {
             for (const a of ancestors) next.add(a);
             return next;
           });
+          // Defer centering until the layout is recalculated after tree expansion
+          pendingCenterNodeId.current = firstLeaf.id;
+          setSelected(firstLeaf.id);
         }
         return;
       }
@@ -799,14 +822,18 @@ export default function App() {
         return next;
       });
 
+      const canvas = canvasRef.current;
+      const cw = canvas?.clientWidth ?? (containerRef.current?.clientWidth ?? window.innerWidth);
+      const ch = canvas?.clientHeight ?? (containerRef.current?.clientHeight ?? window.innerHeight);
       setTransform({
-        x: (containerRef.current?.clientWidth || window.innerWidth) / 2 - targetNode.x,
-        y: (containerRef.current?.clientHeight || window.innerHeight) / 2 - targetNode.y,
+        x: cw / 2 - targetNode.x,
+        y: ch / 2 - targetNode.y,
         k: transform.k,
       });
+      pendingTransform.current = { x: cw / 2 - targetNode.x, y: ch / 2 - targetNode.y, k: transform.k };
       setSelected(targetNode.id);
     },
-    [leafGroupsMerged, treeRoot, leafCountPerItem, transform]
+    [leafGroupsMerged, treeRoot, leafCountPerItem, transform, canvasRef]
   );
 
   function findFirstLeaf(node: TreeNode, targetItemId: string): TreeNode | null {
@@ -906,11 +933,17 @@ export default function App() {
         setHighlightMatchList(matches);
         setHighlightedIds(new Set(matches.map((n) => n.id)));
         setHighlightIdx(0);
-        setTransform({
-          x: (containerRef.current?.clientWidth || window.innerWidth) / 2 - matches[0].x,
-          y: (containerRef.current?.clientHeight || window.innerHeight) / 2 - matches[0].y,
-          k: transform.k,
-        });
+        {
+          const canvas = canvasRef.current;
+          const cw = canvas?.clientWidth ?? (containerRef.current?.clientWidth ?? window.innerWidth);
+          const ch = canvas?.clientHeight ?? (containerRef.current?.clientHeight ?? window.innerHeight);
+          setTransform({
+            x: cw / 2 - matches[0].x,
+            y: ch / 2 - matches[0].y,
+            k: transform.k,
+          });
+          pendingTransform.current = { x: cw / 2 - matches[0].x, y: ch / 2 - matches[0].y, k: transform.k };
+        }
         setSelected(matches[0].id);
         setActiveLeafItemId(null);
         return;
@@ -920,11 +953,15 @@ export default function App() {
         const nextIdx = (highlightIdx + 1) % highlightMatchList.length;
         setHighlightIdx(nextIdx);
         const target = highlightMatchList[nextIdx];
+        const canvas = canvasRef.current;
+        const cw = canvas?.clientWidth ?? (containerRef.current?.clientWidth ?? window.innerWidth);
+        const ch = canvas?.clientHeight ?? (containerRef.current?.clientHeight ?? window.innerHeight);
         setTransform({
-          x: (containerRef.current?.clientWidth || window.innerWidth) / 2 - target.x,
-          y: (containerRef.current?.clientHeight || window.innerHeight) / 2 - target.y,
+          x: cw / 2 - target.x,
+          y: ch / 2 - target.y,
           k: transform.k,
         });
+        pendingTransform.current = { x: cw / 2 - target.x, y: ch / 2 - target.y, k: transform.k };
         setSelected(target.id);
         setActiveLeafItemId(null);
         return;
@@ -944,11 +981,15 @@ export default function App() {
       setHighlightIdx(0);
 
       if (matches.length > 0) {
+        const canvas = canvasRef.current;
+        const cw = canvas?.clientWidth ?? (containerRef.current?.clientWidth ?? window.innerWidth);
+        const ch = canvas?.clientHeight ?? (containerRef.current?.clientHeight ?? window.innerHeight);
         setTransform({
-          x: (containerRef.current?.clientWidth || window.innerWidth) / 2 - matches[0].x,
-          y: (containerRef.current?.clientHeight || window.innerHeight) / 2 - matches[0].y,
+          x: cw / 2 - matches[0].x,
+          y: ch / 2 - matches[0].y,
           k: transform.k,
         });
+        pendingTransform.current = { x: cw / 2 - matches[0].x, y: ch / 2 - matches[0].y, k: transform.k };
         setSelected(matches[0].id);
         setActiveLeafItemId(null);
       }
@@ -1031,7 +1072,20 @@ export default function App() {
                 {Math.round(transform.k * 100)}%
               </span>
               <button
-                onClick={() => setTransform({ x: 48, y: 56, k: 1 })}
+                onClick={() => {
+                  if (!treeRoot) return;
+                  setSelected(treeRoot.id);
+                  setTreeExpanded(new Set([treeRoot.id]));
+                  const canvas = canvasRef.current;
+                  const cw = canvas?.clientWidth ?? (containerRef.current?.clientWidth ?? window.innerWidth);
+                  const ch = canvas?.clientHeight ?? (containerRef.current?.clientHeight ?? window.innerHeight);
+                  setTransform({
+                    x: cw / 2,
+                    y: ch / 2,
+                    k: 1,
+                  });
+                  pendingTransform.current = { x: cw / 2, y: ch / 2, k: 1 };
+                }}
                 className="text-xs px-2.5 py-1 rounded border border-border text-muted-foreground hover:text-foreground hover:border-white/20 transition-colors"
               >
                 Reset view
