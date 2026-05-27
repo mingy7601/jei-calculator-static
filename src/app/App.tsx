@@ -5,7 +5,6 @@
  *   1. Canvas layer — all edges + node rectangles drawn on a single <canvas>
  *      (O(n) draw calls instead of O(n) DOM nodes)
  *   2. HTML overlay — only the hovered/selected node rendered as HTML
- *      (keeps image panels, text selection, and click interaction working)
  *   3. Pan + zoom — transform matrix with scroll-wheel zoom
  *   4. Viewport culling — only draw visible nodes on canvas
  *   5. Lazy tree loading — only build visible subtree initially, expand on demand
@@ -15,6 +14,7 @@ import { useEffect, useRef, useCallback, useMemo, useLayoutEffect } from "react"
 import { useAppState } from "./hooks";
 import { Search, Loader2 } from "lucide-react";
 import { Toaster, toast } from "sonner";
+import { PassivedDropdown } from "./components/PassivedDropdown";
 
 import { getManifest, getEmcMap, getRecipes, preWarmShards, resolveItemId, getLoadedRecipes, getPassivedList, savePassivedList, getManifestData, type RecipeMap, type EmcMap } from "./data";
 import { buildTree, wouldCycle, collectItemIds, type TreeNode as RawTreeNode } from "./tree";
@@ -28,7 +28,6 @@ import { CANVAS_BG, CANVAS_GRID, CANVAS_EDGE, CANDS_EDGE_HL, CANVAS_EDGE_SEL, NO
 
 const TYPE_CONFIG: Record<NodeType, { dot: string; badge: string; text: string; label: string; bg: string }> = {
   root:      { dot: "#22d3ee", badge: "rgba(34,211,238,0.12)",  text: "#22d3ee", label: "root",        bg: "rgba(34,211,238,0.06)" },
-  service:   { dot: "#a78bfa", badge: "rgba(167,139,250,0.12)", text: "#a78bfa", label: "service",     bg: "rgba(167,139,250,0.06)" },
   module:    { dot: "#34d399", badge: "rgba(52,211,153,0.12)",  text: "#34d399", label: "Crafting",     bg: "rgba(52,211,153,0.06)" },
   component: { dot: "#fb923c", badge: "rgba(251,146,60,0.12)",  text: "#fb923c", label: "MAX STEP",     bg: "rgba(251,146,60,0.06)" },
   resource:  { dot: "#94a3b8", badge: "rgba(148,163,184,0.09)", text: "#94a3b8", label: "Raw Resource", bg: "rgba(148,163,184,0.04)" },
@@ -196,7 +195,12 @@ export default function App() {
     isLoading, setIsLoading,
     passivedSet, setPassivedSet,
     passivedList, setPassivedList,
-    showPassivedPanel, setShowPassivedPanel,
+    passivedDropdownOpen, setPassivedDropdownOpen,
+    passivedSearchQuery, setPassivedSearchQuery,
+    passivedSuggestions, setPassivedSuggestions,
+    passivedSuggestionIdx, setPassivedSuggestionIdx,
+    passivedPendingList, setPassivedPendingList,
+    passivedHasChanges, setPassivedHasChanges,
     panActive, setPanActive,
     hoveredNodeId, setHoveredNodeId,
   } = useAppState();
@@ -213,6 +217,21 @@ export default function App() {
   const pendingTransform = useRef<Transform>({ x: 48, y: 56, k: 1 });
   const pendingCenterNodeId = useRef<string | null>(null);
   const autoCompleteTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // ── Sync passivedPendingList when committed list changes (initial load / right-click) ──
+  useEffect(() => {
+    setPassivedPendingList(passivedList);
+  }, [passivedList]);
+
+  // ── Detect whether pending list differs from committed list ──
+  useEffect(() => {
+    const sortedPending = [...passivedPendingList].sort();
+    const sortedCommitted = [...passivedList].sort();
+    setPassivedHasChanges(
+      sortedPending.length !== sortedCommitted.length ||
+        sortedPending.some((v, i) => v !== sortedCommitted[i])
+    );
+  }, [passivedPendingList, passivedList]);
 
   // ── Persist state to localStorage ────────────────────────────────────────
   const persistState = useCallback(() => {
@@ -653,7 +672,8 @@ export default function App() {
       setCardExpanded(new Set());
       setSelected(null);
       setActiveLeafItemId(null);
-      setTransform({ x: 48, y: 56, k: 1 });
+      setLeafGroups({});
+      pendingCenterNodeId.current = unique.id;
       setLoadedRecipes(recipes);
       setItems(sumLeafIngredients(rawTree));
       toast.success(`Loaded: ${displayTree.label}`);
@@ -719,6 +739,7 @@ export default function App() {
         setTreeExpanded(allExpanded);
         setCardExpanded(new Set());
         setActiveLeafItemId(null);
+        setLeafGroups({});
         setLoadedRecipes(recipes);
         setItems(sumLeafIngredients(rawTree));
 
@@ -751,6 +772,23 @@ export default function App() {
     },
     [searchQuery, overrides]
   );
+
+  // ── Reload handler: apply pending passived changes to the tree ──
+  const handlePassivedReload = useCallback(async () => {
+    if (!passivedHasChanges) return;
+    setIsLoading(true);
+    try {
+      savePassivedList(passivedPendingList);
+      setPassivedSet(new Set(passivedPendingList));
+      setPassivedList(passivedPendingList);
+      await rebuildTreeWithPassived(new Set(passivedPendingList));
+      toast.success("Passived list applied — tree reloaded");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to reload tree");
+    } finally {
+      setIsLoading(false);
+    }
+  }, [passivedHasChanges, passivedPendingList, rebuildTreeWithPassived]);
 
   // ── Right-click → toggle node in passived ─────────────────────────────
   const onCanvasContextMenu = useCallback(
@@ -1216,16 +1254,9 @@ export default function App() {
                   if (!treeRoot) return;
                   setSelected(treeRoot.id);
                   setTreeExpanded(new Set([treeRoot.id]));
-                  const canvas = canvasRef.current;
-                  const cw = canvas?.clientWidth ?? (containerRef.current?.clientWidth ?? window.innerWidth);
-                  const ch = canvas?.clientHeight ?? (containerRef.current?.clientHeight ?? window.innerHeight);
-                  setTransform({
-                    x: cw / 2,
-                    y: ch / 2,
-                    k: 1,
-                  });
-                  pendingTransform.current = { x: cw / 2, y: ch / 2, k: 1 };
+                  pendingCenterNodeId.current = treeRoot.id;
                 }}
+                name= "resetView"
                 className="text-xs px-2.5 py-1 rounded border border-border text-muted-foreground hover:text-foreground hover:border-white/20 transition-colors"
               >
                 Reset view
@@ -1258,15 +1289,32 @@ export default function App() {
               >
                 Clear saved
               </button>
-              <button
-                onClick={() => setShowPassivedPanel((p) => !p)}
-                className={`text-xs px-2.5 py-1 rounded border border-border hover:text-foreground hover:border-white/20 transition-colors ${
-                  showPassivedPanel ? "text-yellow-400 border-yellow-400/30" : "text-muted-foreground"
-                }`}
-                title="Manage passived items (leaf nodes that won't be expanded)"
-              >
-                ⚡ Passived ({passivedList.length})
-              </button>
+              <div className="relative">
+                <button
+                  onClick={() => setPassivedDropdownOpen((p) => !p)}
+                  className={`text-xs px-2.5 py-1 rounded border border-border hover:text-foreground hover:border-white/20 transition-colors ${
+                    passivedDropdownOpen ? "text-yellow-400 border-yellow-400/30" : "text-muted-foreground"
+                  }`}
+                  title="Manage passived items (leaf nodes that won't be expanded)"
+                >
+                  ⚡ Passived ({passivedPendingList.length})
+                </button>
+                <PassivedDropdown
+                  passivedPendingList={passivedPendingList}
+                  setPassivedPendingList={setPassivedPendingList}
+                  passivedHasChanges={passivedHasChanges}
+                  setPassivedHasChanges={setPassivedHasChanges}
+                  passivedSearchQuery={passivedSearchQuery}
+                  setPassivedSearchQuery={setPassivedSearchQuery}
+                  passivedSuggestions={passivedSuggestions}
+                  setPassivedSuggestions={setPassivedSuggestions}
+                  passivedSuggestionIdx={passivedSuggestionIdx}
+                  setPassivedSuggestionIdx={setPassivedSuggestionIdx}
+                  passivedDropdownOpen={passivedDropdownOpen}
+                  setPassivedDropdownOpen={setPassivedDropdownOpen}
+                  onReload={handlePassivedReload}
+                />
+              </div>
             </div>
           </header>
 
@@ -1408,113 +1456,7 @@ export default function App() {
             </div>
           )}
 
-          {/* ── Passived panel ── */}
-          {showPassivedPanel && (
-            <div
-              style={{
-                position: "absolute",
-                left: "50%",
-                top: "60px",
-                transform: "translateX(-50%)",
-                width: 340,
-                zIndex: 60,
-                background: "#0e0e1a",
-                border: "1px solid rgba(250,204,21,0.25)",
-                borderRadius: 10,
-                boxShadow: "0 8px 32px rgba(0,0,0,0.55)",
-                fontFamily: "'JetBrains Mono', monospace",
-                overflow: "hidden",
-              }}
-            >
-              <div className="px-3 py-2 border-b border-border flex items-center justify-between" style={{ background: "rgba(250,204,21,0.06)" }}>
-                <span className="text-[11px] font-medium text-yellow-400">Passived Items</span>
-                <button
-                  onClick={() => setShowPassivedPanel(false)}
-                  className="text-[10px] text-muted-foreground hover:text-foreground transition-colors"
-                >
-                  ✕
-                </button>
-              </div>
-              <div className="p-3">
-                <div className="text-[10px] text-muted-foreground mb-2">
-                  Passived items are treated as leaf nodes — no recipe expansion occurs for them. Changes are saved to localStorage.
-                </div>
-                {/* Add new item */}
-                <div className="flex gap-2 mb-2">
-                  <input
-                    type="text"
-                    id="passived-input"
-                    placeholder="Item ID to add…"
-                    className="flex-1 h-7 px-2 text-[11px] rounded border border-border bg-transparent text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-yellow-400/40 transition-colors"
-                    style={{ fontFamily: "'JetBrains Mono', monospace" }}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        const input = e.currentTarget;
-                        const val = input.value.trim();
-                        if (val && !passivedList.includes(val)) {
-                          const next = [...passivedList, val];
-                          setPassivedList(next);
-                          savePassivedList(next);
-                          setPassivedSet(new Set(next));
-                          input.value = "";
-                          toast.success(`"${val}" added to passived — children hidden`);
-                          rebuildTreeWithPassived(new Set(next));
-                        }
-                      }
-                    }}
-                  />
-                  <button
-                    onClick={() => {
-                      const input = document.getElementById("passived-input") as HTMLInputElement;
-                      const val = input.value.trim();
-                      if (val && !passivedList.includes(val)) {
-                        const next = [...passivedList, val];
-                        setPassivedList(next);
-                        savePassivedList(next);
-                        setPassivedSet(new Set(next));
-                        input.value = "";
-                        toast.success(`"${val}" added to passived — children hidden`);
-                        rebuildTreeWithPassived(new Set(next));
-                      }
-                    }}
-                    className="h-7 px-3 text-[11px] rounded border border-yellow-400/30 text-yellow-400 hover:bg-yellow-400/10 transition-colors"
-                  >
-                    Add
-                  </button>
-                </div>
-                {/* Current passived list */}
-                <div className="space-y-1 max-h-40 overflow-y-auto">
-                  {passivedList.length === 0 ? (
-                    <div className="text-[10px] text-muted-foreground text-center py-2">No passived items</div>
-                  ) : (
-                    passivedList.map((item) => (
-                      <div
-                        key={item}
-                        className="flex items-center justify-between gap-2 px-2 py-1 rounded text-[11px]"
-                        style={{ background: "rgba(250,204,21,0.06)" }}
-                      >
-                        <span className="text-foreground truncate">{item}</span>
-                        <button
-                          onClick={() => {
-                            const next = passivedList.filter((i) => i !== item);
-                            setPassivedList(next);
-                            savePassivedList(next);
-                            setPassivedSet(new Set(next));
-                            toast.success(`"${item}" removed from passived — children shown`);
-                            rebuildTreeWithPassived(new Set(next), item);
-                          }}
-                          className="text-xs text-muted-foreground hover:text-red-400 transition-colors shrink-0"
-                          title="Remove"
-                        >
-                          ✕
-                        </button>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
+
 
           {/* ── Status bar ── */}
           <footer

@@ -10,7 +10,7 @@ import type { TreeNode as RawTreeNode } from "./tree";
 
 // ─── Node type system ───────────────────────────────────────────────────────
 
-export type NodeType = "root" | "service" | "module" | "component" | "resource" | "emc" | "passived" | "cycle";
+export type NodeType = "root" | "module" | "component" | "resource" | "emc" | "passived" | "cycle";
 
 // ─── Tree node (display) ────────────────────────────────────────────────────
 
@@ -93,4 +93,4 @@ export interface Edge {
 
 export type RecipeMap = RawRecipeMap;
 export type EmcMap = RawEmcMap;
-export type { RawTreeNode } from "./tree";
+export type { RawTreeNode };

@@ -96,8 +96,25 @@ export function useAppState() {
   // Passived list stored as string[] (for rendering the panel)
   const [passivedList, setPassivedList] = useState<string[]>([]);
 
-  // Whether the passived management panel is visible
-  const [showPassivedPanel, setShowPassivedPanel] = useState(false);
+  // Passived dropdown visibility (replaces showPassivedPanel)
+  const [passivedDropdownOpen, setPassivedDropdownOpen] = useState(false);
+
+  // Search input value for passived autocomplete
+  const [passivedSearchQuery, setPassivedSearchQuery] = useState("");
+
+  // Filtered autocomplete suggestions for passived search
+  const [passivedSuggestions, setPassivedSuggestions] = useState<
+    { name: string; id: string }[]
+  >([]);
+
+  // Keyboard navigation index into passived suggestions
+  const [passivedSuggestionIdx, setPassivedSuggestionIdx] = useState(-1);
+
+  // Draft list of item IDs — not applied until "Reload" is clicked
+  const [passivedPendingList, setPassivedPendingList] = useState<string[]>([]);
+
+  // Whether pending changes differ from the committed passived list
+  const [passivedHasChanges, setPassivedHasChanges] = useState(false);
 
   // Whether the user is actively panning the canvas
   const [panActive, setPanActive] = useState(false);
@@ -134,7 +151,12 @@ export function useAppState() {
     isLoading, setIsLoading,
     passivedSet, setPassivedSet,
     passivedList, setPassivedList,
-    showPassivedPanel, setShowPassivedPanel,
+    passivedDropdownOpen, setPassivedDropdownOpen,
+    passivedSearchQuery, setPassivedSearchQuery,
+    passivedSuggestions, setPassivedSuggestions,
+    passivedSuggestionIdx, setPassivedSuggestionIdx,
+    passivedPendingList, setPassivedPendingList,
+    passivedHasChanges, setPassivedHasChanges,
     panActive, setPanActive,
     hoveredNodeId, setHoveredNodeId,
     autoCompleteOpen, setAutoCompleteOpen,
