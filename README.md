@@ -2,6 +2,7 @@
 
 
 ### TODO
+- [ ] SPEED IT UP
 - [ ] Make invalid search return item not found
 - [ ] Toggle to hide emc items from raw materials
 - [ ] Cache generated trees
@@ -13,7 +14,19 @@
 - [ ] Add quantity for root item
 - [ ] Remove alternatives button for leaf + passive nodes
 - [ ] Items in passived should be able to be expanded if it is the root
-
+- [ ] Adding items to passive requiring a manual reload
+- [ ] Add rmb menu for goto parent and add to passive list
+- [ ] Look into keyboard controls
+- [ ] Centering node on new alternative
+- [ ] Presets of configs
+- [ ] Passived text being weird
+- [ ] Fix culling of lines between nodes when offscreen
+- [ ] control + f to search node
+- [ ] node search bar not working on non 100% zoom
+- [ ] count matches in node search bar
+- [ ] Clicking the sidebar a second time shifts the view
+- [ ] Fix cycle on things that aren't cycles
+- [ ] Summary view with intermediaries
 ### LOW PRIO
 - [ ] Zoom smoothing
 - [ ] Add recipe card previews when hovering over alteranatives
@@ -62,3 +75,4 @@
 - [x] Mechanized coops
 - [ ] Handle ore dictionary
 - [ ] Remove redundant recipes when there is a clear upgrade
+- [ ] Essence recipes

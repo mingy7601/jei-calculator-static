@@ -81,6 +81,9 @@ export function useAppState() {
   // Current index into highlightMatchList
   const [highlightIdx, setHighlightIdx] = useState(-1);
 
+  // Key that forces the centering effect to re-run (incremented on each centering request)
+  const [centeringKey, setCenteringKey] = useState(0);
+
   // Pan + zoom transform matrix
   const [transform, setTransform] = useState<Transform>({ x: 48, y: 56, k: 1 });
 
@@ -146,6 +149,7 @@ export function useAppState() {
     highlightedIds, setHighlightedIds,
     highlightMatchList, setHighlightMatchList,
     highlightIdx, setHighlightIdx,
+    centeringKey, setCenteringKey,
     transform, setTransform,
     searchQuery, setSearchQuery,
     isLoading, setIsLoading,

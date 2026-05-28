@@ -67,6 +67,39 @@ function countAll(node: TreeNode): number {
   return 1 + (node.children?.reduce((s, c) => s + countAll(c), 0) ?? 0);
 }
 
+// Walk the full tree (not just expanded parts) to find all nodes matching the query.
+function searchFullTree(node: TreeNode | null, q: string, out: LayoutNode[] = []): LayoutNode[] {
+  if (!node) return out;
+  const labelMatch = node.label.toLowerCase().includes(q);
+  const itemIdMatch = node.itemId && node.itemId.toLowerCase().includes(q);
+  if (labelMatch || itemIdMatch) {
+    out.push({ ...node, x: 0, y: 0, height: NODE_H_BASE });
+  }
+  if (node.children) {
+    for (const c of node.children) {
+      searchFullTree(c, q, out);
+    }
+  }
+  return out;
+}
+
+// Walk the full tree (not just expanded parts) to find the first node matching targetItemId,
+// then collect all ancestor node IDs so the tree can be expanded to show it.
+function collectAncestorIdsToExpand(treeRoot: TreeNode, targetItemId: string): string[] {
+  const ancestors: string[] = [];
+  function walk(n: TreeNode): boolean {
+    if ((n.itemId ?? n.id) === targetItemId) { ancestors.push(n.id); return true; }
+    if (n.children) {
+      for (const c of n.children) {
+        if (walk(c)) { ancestors.push(n.id); return true; }
+      }
+    }
+    return false;
+  }
+  walk(treeRoot);
+  return ancestors;
+}
+
 // ─── Convert raw TreeNode → display TreeNode ──────────────────────────────────
 
 
@@ -187,6 +220,7 @@ export default function App() {
     highlightedIds, setHighlightedIds,
     highlightMatchList, setHighlightMatchList,
     highlightIdx, setHighlightIdx,
+    centeringKey, setCenteringKey,
     transform, setTransform,
     searchQuery, setSearchQuery,
     autoCompleteOpen, setAutoCompleteOpen,
@@ -206,6 +240,7 @@ export default function App() {
   } = useAppState();
 
   const lastSearchQuery = useRef("");
+  const lastTreeRootId = useRef<string | null>(null);
 
   const autoCompleteRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -476,7 +511,7 @@ export default function App() {
       k: pendingTransform.current.k,
     });
     pendingTransform.current = { x: cw / 2 - target.x - NODE_W / 2, y: ch / 2 - target.y - target.height / 2, k: pendingTransform.current.k };
-  }, [nodes, byId, setTransform]);
+  }, [nodes, byId, setTransform, centeringKey]);
 
 
 
@@ -621,6 +656,7 @@ export default function App() {
       const isSelected = selected === node.id;
       const isHovered = hoveredNodeId === node.id;
       const isTreeEx = treeExpanded.has(node.id);
+      const isHighlighted = highlightedIds.has(node.id);
       const cfg = TYPE_CONFIG[node.type];
       let borderColor: string;
       let bgColor: string;
@@ -631,6 +667,9 @@ export default function App() {
       } else if (isHovered) {
         borderColor = NODE_BORDER_HL;
         bgColor = "rgba(34,211,238,0.08)";
+      } else if (isHighlighted) {
+        borderColor = NODE_BORDER_HL;
+        bgColor = "rgba(34,211,238,0.06)";
       } else if (isPassived) {
         borderColor = "rgba(250,204,21,0.55)";
         bgColor = "var(--card)";
@@ -1064,6 +1103,35 @@ export default function App() {
   );
 
   // ── Highlight search ───────────────────────────────────────────────────────
+
+  // Shared logic: search the full tree, set highlight state, expand ancestors,
+  // and trigger centering. Returns true if matches were found.
+  const performHighlightSearch = useCallback(
+    (q: string) => {
+      const matches = searchFullTree(treeRoot, q);
+      setHighlightMatchList(matches);
+      setHighlightedIds(new Set(matches.map((n) => n.id)));
+      setHighlightIdx(0);
+
+      if (matches.length === 0) {
+        toast.info(`No matches for "${q}"`);
+        return false;
+      }
+
+      lastSearchQuery.current = q;
+      lastTreeRootId.current = treeRoot?.id ?? null;
+
+      const ancestors = collectAncestorIdsToExpand(treeRoot!, matches[0].itemId ?? matches[0].id);
+      setTreeExpanded((prev) => new Set([...prev, ...ancestors]));
+      pendingCenterNodeId.current = matches[0].id;
+      setCenteringKey((prev) => prev + 1);
+      setSelected(matches[0].id);
+      setActiveLeafItemId(null);
+      return true;
+    },
+    [treeRoot, setCenteringKey]
+  );
+
   const handleHighlightKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
       if (e.key !== "Enter") return;
@@ -1078,83 +1146,29 @@ export default function App() {
         return;
       }
 
-      // If query changed since last search, recompute matches
-      if (q !== lastSearchQuery.current) {
-        lastSearchQuery.current = q;
-        const matches: LayoutNode[] = [];
-        for (const n of nodes) {
-          if (
-            n.label.toLowerCase().includes(q) ||
-            (n.itemId && n.itemId.toLowerCase().includes(q))
-          ) {
-            matches.push(n);
-          }
-        }
-        setHighlightMatchList(matches);
-        setHighlightedIds(new Set(matches.map((n) => n.id)));
-        setHighlightIdx(0);
-        {
-          const canvas = canvasRef.current;
-          const cw = canvas?.clientWidth ?? (containerRef.current?.clientWidth ?? window.innerWidth);
-          const ch = canvas?.clientHeight ?? (containerRef.current?.clientHeight ?? window.innerHeight);
-          setTransform({
-            x: cw / 2 - matches[0].x,
-            y: ch / 2 - matches[0].y,
-            k: transform.k,
-          });
-          pendingTransform.current = { x: cw / 2 - matches[0].x, y: ch / 2 - matches[0].y, k: transform.k };
-        }
-        setSelected(matches[0].id);
-        setActiveLeafItemId(null);
-        return;
-      }
+      // Check if the query AND tree are the same as last time
+      const isSameSearch =
+        q === lastSearchQuery.current &&
+        (treeRoot?.id ?? null) === lastTreeRootId.current;
 
-      if (highlightMatchList.length > 0) {
+      if (isSameSearch && highlightMatchList.length > 0) {
+        // Cycle to next match
         const nextIdx = (highlightIdx + 1) % highlightMatchList.length;
         setHighlightIdx(nextIdx);
         const target = highlightMatchList[nextIdx];
-        const canvas = canvasRef.current;
-        const cw = canvas?.clientWidth ?? (containerRef.current?.clientWidth ?? window.innerWidth);
-        const ch = canvas?.clientHeight ?? (containerRef.current?.clientHeight ?? window.innerHeight);
-        setTransform({
-          x: cw / 2 - target.x,
-          y: ch / 2 - target.y,
-          k: transform.k,
-        });
-        pendingTransform.current = { x: cw / 2 - target.x, y: ch / 2 - target.y, k: transform.k };
+        const ancestors = collectAncestorIdsToExpand(treeRoot!, target.itemId ?? target.id);
+        setTreeExpanded((prev) => new Set([...prev, ...ancestors]));
+        pendingCenterNodeId.current = target.id;
+        setCenteringKey((prev) => prev + 1);
         setSelected(target.id);
         setActiveLeafItemId(null);
         return;
       }
 
-      const matches: LayoutNode[] = [];
-      for (const n of nodes) {
-        if (
-          n.label.toLowerCase().includes(q) ||
-          (n.itemId && n.itemId.toLowerCase().includes(q))
-        ) {
-          matches.push(n);
-        }
-      }
-      setHighlightMatchList(matches);
-      setHighlightedIds(new Set(matches.map((n) => n.id)));
-      setHighlightIdx(0);
-
-      if (matches.length > 0) {
-        const canvas = canvasRef.current;
-        const cw = canvas?.clientWidth ?? (containerRef.current?.clientWidth ?? window.innerWidth);
-        const ch = canvas?.clientHeight ?? (containerRef.current?.clientHeight ?? window.innerHeight);
-        setTransform({
-          x: cw / 2 - matches[0].x,
-          y: ch / 2 - matches[0].y,
-          k: transform.k,
-        });
-        pendingTransform.current = { x: cw / 2 - matches[0].x, y: ch / 2 - matches[0].y, k: transform.k };
-        setSelected(matches[0].id);
-        setActiveLeafItemId(null);
-      }
+      // New search or tree changed — perform full re-search
+      performHighlightSearch(q);
     },
-    [nodes, highlightMatchList, highlightIdx, transform]
+    [treeRoot, highlightMatchList, highlightIdx, performHighlightSearch]
   );
 
   const handleHighlightClear = useCallback(() => {
@@ -1332,6 +1346,7 @@ export default function App() {
           <div className="shrink-0 flex items-center gap-2 px-4 h-9 border-b border-border">
             <Search size={11} className="text-muted-foreground shrink-0" />
             <input
+              name="nodeSearchBar"
               type="text"
               value={highlightSearch}
               onChange={(e) => setHighlightSearch(e.target.value)}
@@ -1340,10 +1355,10 @@ export default function App() {
               className="flex-1 h-5 px-2 text-[11px] rounded border border-border bg-transparent text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-[rgba(34,211,238,0.4)] transition-colors"
               style={{ fontFamily: "'JetBrains Mono', monospace" }}
             />
-            {highlightedIds.size > 0 && (
+            {highlightMatchList.length > 0 && (
               <>
                 <span className="text-[10px] text-muted-foreground tabular-nums" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
-                  {highlightedIds.size} match{highlightedIds.size !== 1 ? "es" : ""}
+                  {highlightIdx + 1}/{highlightMatchList.length} matches
                 </span>
                 <button
                   onClick={handleHighlightClear}
