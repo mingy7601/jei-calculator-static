@@ -1,6 +1,4 @@
 /**
- * ingredients.ts — TypeScript port of summarize_ingredients.py
- *
  * sumLeafIngredients(node) walks a TreeNode and accumulates quantities
  * for every leaf (nodes with no inputs). Returns a map sorted by qty desc.
  */

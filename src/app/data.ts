@@ -69,6 +69,7 @@ const DATA_BASE = "/data";
 
 let manifest: Manifest | null = null;
 let emcMap: EmcMap | null = null;
+let allShardsLoaded = false;
 
 // Shard cache: modName → expanded recipes for all items in that shard
 const shardCache = new Map<string, RecipeMap>();
@@ -182,6 +183,28 @@ export async function preWarmShards(itemIds: string[]): Promise<void> {
 export async function resolveItemId(query: string): Promise<string> {
   const mf = await getManifest();
   return mf.nameToId[query.toLowerCase()] ?? query;
+}
+
+/**
+ * Preload every recipe shard from the manifest.
+ * Call this once at startup so getLoadedRecipes() returns complete data
+ * and the tree never sees a partial map (which causes items to appear as
+ * "base" leaves until their shards are lazily loaded later).
+ */
+export async function preloadAllShards(): Promise<void> {
+  if (allShardsLoaded) return; // already done
+  const mf = await getManifest();
+  // Skip shards already cached or in-flight
+  const toLoad = mf.shards.filter(
+    (m) => !shardCache.has(m) && !inFlight.has(m)
+  );
+  if (!toLoad.length) {
+    allShardsLoaded = true;
+    return;
+  }
+  console.log(`Preloading ${toLoad.length} recipe shards…`);
+  await Promise.all(toLoad.map(loadShard));
+  allShardsLoaded = true;
 }
 
 /**

@@ -23,8 +23,7 @@
 - [ ] Fix culling of lines between nodes when offscreen
 - [ ] control + f to search node
 - [ ] node search bar not working on non 100% zoom
-- [ ] count matches in node search bar
-- [ ] Clicking the sidebar a second time shifts the view
+
 - [ ] Fix cycle on things that aren't cycles
 - [ ] Summary view with intermediaries
 ### LOW PRIO
@@ -56,7 +55,8 @@
 - [x] Redo passived tab
 - [x] Passive item should accept both id and name
 - [x] Make alternatives panel disapear on mouse click
-
+- [x] Clicking the sidebar a second time shifts the view
+- [x] count matches in node search bar
 ### BUGS
 - [ ] Fix rendering issue. Idk why it happens
 ### RECIPE FILTERING

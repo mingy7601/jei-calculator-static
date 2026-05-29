@@ -74,6 +74,7 @@
     "@types/node": "^25.9.1",
     "@vitejs/plugin-react": "4.7.0",
     "tailwindcss": "4.1.12",
+    "typescript": "^6.0.3",
     "vite": "6.3.5",
     "vitest": "^4.1.7",
     "wrangler": "^4.92.0"

@@ -1,5 +1,5 @@
 /**
- * tree.ts — TypeScript port of tree.py
+ * tree.ts
  *
  * All functions are synchronous and take a pre-loaded RecipeMap.
  * Load shards via data.ts before calling buildTree.
@@ -42,68 +42,6 @@ function outputQty(recipe: Recipe, itemId: string): number {
   return 0;
 }
 
-// ── Cycle detection ───────────────────────────────────────────────────────────
-
-/** Memoized wouldCycle cache: "inputId:targetId" → cycle depth (0 = no cycle, 1 = immediate loop, 2+ = deferred) */
-let cycleCache = new Map<string, number>();
-
-function cycleCacheKey(inputId: string, targetId: string): string {
-  return inputId + "\0" + targetId;
-}
-
-/**
- * Two-tier cycle detection return values:
- *   0 — no cycle detected
- *   1 — immediate loop (depth 1): e.g. A → child_recipe → A
- *       → should be rerouted (try alternative recipe)
- *   2+ — deferred loop (depth ≥ 2): e.g. A → B → C → A
- *       → treat the second occurrence as a leaf node
- *
- * With maxDepth=1, only immediate loops are detected here.
- * Deferred loops (depth ≥ 2) are caught by visited.has() in buildTree
- * when the recursive call reaches the ancestor item.
- */
-export function wouldCycle(
-  inputId: string,
-  targetId: string,
-  recipes: RecipeMap,
-  depth = 0,
-  maxDepth = 1,
-  visited?: ReadonlySet<string>,
-  _nodeCount?: { count: number },
-  maxNodes?: number
-): number {
-  // Recursion stack check — catches cycles within the current build path
-  if (visited?.has(inputId)) return depth + 1;
-  // Direct self-reference
-  if (inputId === targetId) return 1;
-  // Depth limit — stop searching for longer cycles
-  if (depth >= maxDepth) return 0;
-  // Node budget exhausted — stop to prevent stall
-  if (_nodeCount && maxNodes && _nodeCount.count >= maxNodes) return 0;
-
-  const cacheKey = cycleCacheKey(inputId, targetId);
-  const cached = cycleCache.get(cacheKey);
-  if (cached !== undefined) return cached;
-
-  const options = recipes[inputId];
-  if (!options?.length) {
-    cycleCache.set(cacheKey, 0);
-    return 0;
-  }
-
-  const viable = options.filter(
-    (r) =>
-      !r.inputs.some((inp) =>
-        wouldCycle(inp.id, targetId, recipes, depth + 1, maxDepth, visited, _nodeCount, maxNodes)
-      )
-  );
-
-  const result = viable.length === 0 ? 1 : 0;
-  cycleCache.set(cacheKey, result);
-  return result;
-}
-
 // ── Build tree ────────────────────────────────────────────────────────────────
 
 export function buildTree(
@@ -127,10 +65,6 @@ export function buildTree(
     maxDepth?: number;
   } = {}
 ): TreeNode {
-  // Per-build cache to deduplicate wouldCycle calls across recipes
-  // that share the same inputs (common in crafting mod DAGs)
-  const cycleCheckCache = new Map<string, number>();
-
   const {
     name,
     visited = new Set<string>(),
@@ -179,30 +113,29 @@ export function buildTree(
 
   const childVisited = new Set(visited).add(item);
 
-  // Two-tier cycle filtering:
-  //   depth 1 (immediate loop): reroute — filter out this recipe, try alternatives
-  //   depth > 1 (deferred loop): leaf — the second occurrence becomes a leaf node
-  // We check each recipe's inputs: if any input would cause a cycle at depth 1,
-  // the recipe is excluded (reroute). If depth > 1, the input will be expanded
-  // but the second occurrence will be caught by visited.has() in buildTree.
-  let viable = options.filter((r) => {
-    // depth 1 = immediate loop → reroute (exclude recipe)
-    // depth > 1 = deferred loop → keep recipe (second occurrence becomes leaf)
-    return !r.inputs.some((inp) => {
-      const checkKey = inp.id + "\0" + item;
-      let cycleDepth: number;
-      if (cycleCheckCache.has(checkKey)) {
-        cycleDepth = cycleCheckCache.get(checkKey)!;
-      } else {
-        cycleDepth = wouldCycle(inp.id, item, recipes, 0, maxDepth, visited, _nodeCount, maxNodes);
-        cycleCheckCache.set(checkKey, cycleDepth);
-      }
-      return cycleDepth === 1;
-    });
-  });
+  // Only filter out recipes that directly require the current item as an input
+  // (a self-loop: A's recipe needs A).  Every other cycle is caught naturally:
+  // when recursion reaches an ancestor, visited.has(item) fires at the top of
+  // that call and returns a cycle leaf *there*, so the leaf node in the tree is
+  // always the ancestor item itself rather than an intermediate node.
+  //
+  //   Direct self-loop (A → [A, ...]): filtered here; if all recipes self-loop,
+  //     A becomes a cycle leaf immediately.
+  //
+  //   Reversible (A → B → A): B's recipe requiring A is not filtered (A ≠ B).
+  //     Recursion into A hits visited.has("A") and returns a cycle leaf for A.
+  //     If B also has a non-cycling recipe it is preferred by best-recipe
+  //     selection, but the looping recipe is still valid and kept as a fallback.
+  //
+  //   Long loop (A → B → C → A): C's recipe requiring A is not filtered.
+  //     Recursion into A hits visited.has("A") and returns a cycle leaf for A —
+  //     the leaf is A, one step deeper, exactly as desired.
+  let viable = options.filter(
+    (r) => !r.inputs.some((inp) => inp.id === item)
+  );
 
-  // If no viable recipes remain after rerouting all immediate loops,
-  // return a cycle leaf node (the item itself is the cycle root)
+  // If every recipe for this item requires itself as a direct input,
+  // return a cycle leaf immediately
   if (!viable.length) {
     const result: TreeNode = { item, name: name ?? item, source: "cycle" };
     memo.set(memoKey, result);

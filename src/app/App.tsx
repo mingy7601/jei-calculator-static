@@ -16,8 +16,11 @@ import { Search, Loader2 } from "lucide-react";
 import { Toaster, toast } from "sonner";
 import { PassivedDropdown } from "./components/PassivedDropdown";
 
-import { getManifest, getEmcMap, getRecipes, preWarmShards, resolveItemId, getLoadedRecipes, getPassivedList, savePassivedList, getManifestData, type RecipeMap, type EmcMap } from "./data";
-import { buildTree, wouldCycle, collectItemIds, type TreeNode as RawTreeNode } from "./tree";
+import { getManifest, getEmcMap, getRecipes, resolveItemId, getLoadedRecipes, getPassivedList, savePassivedList, getManifestData, preloadAllShards, type RecipeMap, type EmcMap } from "./data";
+import { buildTree, type TreeNode as RawTreeNode } from "./tree";
+import { TreeProxy } from "../workers/tree.proxy";
+
+let proxyRef: { current: TreeProxy | null } = { current: null }; // module-level, used by loadTree/getAlternatives
 import { sumLeafIngredients } from "./ingredients";
 import { loadState, saveState, clearState } from "./state-persist";
 import type { NodeType, TreeNode, LayoutNode, LeafGroup, AltOption, ItemsData, Transform, NodeHitBoxes, Edge } from "./types";
@@ -102,7 +105,6 @@ function collectAncestorIdsToExpand(treeRoot: TreeNode, targetItemId: string): s
 
 // ─── Convert raw TreeNode → display TreeNode ──────────────────────────────────
 
-
 function rawToDisplay(node: RawTreeNode, isRoot = false): TreeNode {
   const itemId = node.item ?? "unknown";
   const source = node.source;
@@ -130,7 +132,7 @@ function rawToDisplay(node: RawTreeNode, isRoot = false): TreeNode {
   const qtyStr = Number.isInteger(qty) ? String(qty) : qty.toFixed(1);
   const displayLabel = `${label} x ${qtyStr}`;
 
-  const meta = nodeType === "emc" ? "emc" : (nodeType === "passived" ? "passived" : (nodeType === "cycle" ? "cycle" : (node.category_name ?? "N/A")));
+  const meta = nodeType === "emc" ? "emc" : (nodeType === "passived" ? "passived" : (nodeType === "cycle" ? "cycle" : (node.category_name ?? "No category found")));
   const imageUrl = node.image_path ? `/static/${node.image_path}` : undefined;
 
   const result: TreeNode = {
@@ -156,6 +158,11 @@ async function loadTree(
   overrides: Record<string, number> = {},
   passived: ReadonlySet<string> = new Set()
 ): Promise<{ displayTree: TreeNode; rawTree: RawTreeNode; recipes: RecipeMap; emcValues: EmcMap }> {
+  // Preload all shards so getLoadedRecipes() returns complete data.
+  // This prevents the tree from seeing a partial map where most items
+  // appear as "base" (raw resource) leaves until their shards load lazily.
+  await preloadAllShards();
+
   const [itemId, emcValues] = await Promise.all([
     resolveItemId(query),
     getEmcMap(),
@@ -173,28 +180,57 @@ async function loadTree(
   })();
 
   const recipes = getLoadedRecipes();
-  const shallowTree = buildTree(itemId, recipes, 0, { name: rootName, overrides, emcValues, passived });
-  const allIds = Array.from(collectItemIds(shallowTree));
 
-  await preWarmShards(allIds);
+  // Build the tree once — single source of truth.
+  // The worker proxy handles postMessage; main-thread fallback uses yield to avoid blocking.
+  const proxy = proxyRef.current;
+  let rawTree: RawTreeNode;
 
-  const fullRecipes = getLoadedRecipes();
-  const rawTree = buildTree(itemId, fullRecipes, 0, { name: rootName, overrides, emcValues, passived });
+  if (proxy) {
+    try {
+      const result = await proxy.buildTree(itemId, { name: rootName, overrides, passived: [...passived], recipes, emcValues });
+      if (result.type === "error") throw new Error(result.error);
+      rawTree = result.treeNode as RawTreeNode;
+    } catch (e) {
+      // Worker failed — fall back to main thread
+      console.warn("Worker build failed, falling back to main thread:", e);
+      proxyRef.current = null; // disable worker for future calls
+      await yieldToMain();
+      rawTree = buildTree(itemId, recipes, 0, { name: rootName, overrides, emcValues, passived });
+    }
+  } else {
+    // Worker unavailable — use main thread with yield
+    await yieldToMain();
+    rawTree = buildTree(itemId, recipes, 0, { name: rootName, overrides, emcValues, passived });
+  }
 
-  return { displayTree: rawToDisplay(rawTree, true), rawTree, recipes: fullRecipes, emcValues };
+  return { displayTree: rawToDisplay(rawTree, true), rawTree, recipes, emcValues };
 }
 
-function getAlternatives(itemId: string, recipes: RecipeMap): AltOption[] {
+function yieldToMain(): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, 0));
+}
+
+async function getAlternatives(itemId: string, recipes: RecipeMap): Promise<AltOption[]> {
   const options = recipes[itemId] ?? [];
-  return options
-    .filter((r) => !r.inputs.some((inp) => wouldCycle(inp.id, itemId, recipes)))
-    .map((r) => ({
-      recipe_id: r.id,
-      category_name: r.category_name,
-      image_url: r.image_path ? `/static/${r.image_path}` : "",
-      inputs: r.inputs.map((i) => ({ name: i.name ?? i.id, qty: i.qty ?? 1 })),
-      outputs: r.outputs.map((o) => ({ id: o.id, name: o.name ?? o.id, qty: o.qty ?? 1 })),
-    }));
+
+  // A recipe is cyclic if any of its inputs is the item itself or is already
+  // an ancestor on the current path.  Since we're at the root of the
+  // alternatives query the only immediate cycle is inp.id === itemId.
+  const results: AltOption[] = [];
+  for (const r of options) {
+    const hasImmediateCycle = r.inputs.some((inp) => inp.id === itemId);
+    if (!hasImmediateCycle) {
+      results.push({
+        recipe_id: r.id,
+        category_name: r.category_name,
+        image_url: r.image_path ? `/static/${r.image_path}` : "",
+        inputs: r.inputs.map((i) => ({ name: i.name ?? i.id, qty: i.qty ?? 1 })),
+        outputs: r.outputs.map((o) => ({ id: o.id, name: o.name ?? o.id, qty: o.qty ?? 1 })),
+      });
+    }
+  }
+  return results;
 }
 
 // ─── Main component ───────────────────────────────────────────────────────────
@@ -462,6 +498,8 @@ export default function App() {
     setSearchQuery(item);
     // Restore overrides so alternatives are applied
     setOverrides(savedOverrides);
+    // Initialize tree worker proxy
+    proxyRef.current = new TreeProxy();
     setIsLoading(true);
     (async () => {
       try {
@@ -871,7 +909,7 @@ export default function App() {
 
   // ── Canvas click handler ──────────────────────────────────────────────────
   const onCanvasClick = useCallback(
-    (e: React.MouseEvent) => {
+    async (e: React.MouseEvent) => {
       const canvas = canvasRef.current;
       if (!canvas) return;
       const rect = canvas.getBoundingClientRect();
@@ -903,7 +941,7 @@ export default function App() {
           isPointInRect(mx, my, boxes.altDoubleArrow.x, boxes.altDoubleArrow.y, boxes.altDoubleArrow.w, boxes.altDoubleArrow.h)
         ) {
           const realItemId = node.itemId ?? node.id;
-          const options = getAlternatives(realItemId, loadedRecipes);
+          const options = await getAlternatives(realItemId, loadedRecipes);
           if (options.length > 0) {
             const panelCols = Math.ceil(options.length / 8);
             const panelW = panelCols * 260;
